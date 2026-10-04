@@ -1,0 +1,23 @@
+[project]
+name = "mojo-geographiclib"
+version = "0.1.0"
+description = "GeographicLib's geodesic routines implemented in Mojo"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Lee Penkman", email = "leepenkman@gmail.com" }]
+keywords = ["mojo", "geodesic", "geographiclib", "wgs84", "ellipsoid"]
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+dev = ["pytest", "geographiclib"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+
+[tool.setuptools.packages.find]
+where = ["python"]
