@@ -200,50 +200,74 @@ Measured on:
     Intel(R) Xeon(R) CPU E5-2697 v4 @ 2.30GHz, 72 threads, Linux x86_64
     python 3.13.14, numpy 2.5.1, best of 3
 
-"before" and "after" are this session's two `pixi run bench` runs on the same
-box, before and after the unroll pass; the earlier table this file shipped with
-is not reused because the box has changed. This is a shared box, so treat the
-short rows as a range rather than a point: three full runs of the *same* build
-gave 39.22, 43.08 and 44.13 ms for `Inverse, 100k, all outputs` (and 39.00 ms
-for the run before the last one), 13.05-15.61 ms for `Direct, 100k`, and
-46.37-47.54 ms for `AddPoints, 20k`. A difference of a few ms in those rows is
-noise, which is why the unroll verdict below rests on the kernel-level A/B.
+"before" and "after" are the unroll pass's two `pixi run bench` runs on the
+same box, before and after the unroll; the earlier table this file shipped with
+is not reused because the box has changed. This is a shared box (load average
+18-20 of 72 threads when the table below was re-measured), so treat the short
+rows as a range rather than a point: six full runs of the *same* build gave
+73.19-87.07 ms for `Inverse, 100k, all outputs`, 28.62-32.28 ms for `Direct,
+100k`, and 45.87-49.38 ms for `AddPoints, 20k`. A difference of a few ms in
+those rows is noise, which is why the unroll verdict below rests on the
+kernel-level A/B.
+
+**Re-measured 2026-11-10 (verify pass).** The *after* column is now the median
+of six `pixi run bench` runs of the shipped build in this session, and the
+*upstream* column the median of the same six; both are this session's numbers.
+The batch rows did not reproduce from the figures this file carried before that
+pass -- `Inverse, 100k, all` was 41.63 / 43.08 ms there against 76.62 ms now,
+`Direct, 100k` 14.44 / 15.61 against 31.16, `ArcDirect, 100k` 14.49 / 19.45
+against 28.41 and `Positions, 100k` 20.23 / 9.97 against 17.35 -- all outside
+the box's own spread. The scalar and `PolygonArea` rows did reproduce within
+20%. The cause of the gap is visible in `bench/profile.py`: of a 77.1 ms
+`InversePairs` call, `_run` (kernel + output copy) is 55.6 ms and the NumPy
+post-pass `_result` 14.2 ms, and on this box `_result`'s `atan2d` alone is
+13.1 ms. The direction and the "batch rows are not like-for-like" caveat are
+unchanged; the sizes are roughly half what this file claimed.
 
 | case | note | before | after | upstream | speedup |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Inverse, 20k scalar calls (Python loop) | scalar API, STANDARD mask | 238.84 ms | 257.95 ms | 2769.90 ms | 10.7x |
-| Inverse, 100k points, all outputs | batch API vs upstream loop | 41.63 ms | 43.08 ms | 14187.75 ms | 329.3x |
-| Inverse, 100k points, STANDARD mask | batch API vs upstream loop | 34.63 ms | 40.60 ms | 12290.53 ms | 302.7x |
-| Direct, 100k points, all outputs | batch API vs upstream loop | 14.44 ms | 15.61 ms | 6257.65 ms | 400.9x |
-| ArcDirect, 100k points, all outputs | batch API vs upstream loop | 14.49 ms | 19.45 ms | 5980.50 ms | 307.5x |
-| GeodesicLine.Position, 20k calls | scalar API, one line | 124.14 ms | 115.84 ms | 181.41 ms | 1.6x |
-| GeodesicLine.Positions, 100k | batch API vs upstream loop | 20.23 ms | 9.97 ms | 923.29 ms | 92.6x |
-| PolygonArea, 20k vertices (AddPoints) | batch API vs upstream loop | 47.54 ms | 47.12 ms | 2761.11 ms | 58.6x |
-| PolygonArea, 20k vertices (AddPoint) | scalar API on both sides | 95.85 ms | 97.77 ms | 2743.29 ms | 28.1x |
+| Inverse, 20k scalar calls (Python loop) | scalar API, STANDARD mask | 238.84 ms | 245.69 ms | 2724.12 ms | 11.1x |
+| Inverse, 100k points, all outputs | batch API vs upstream loop | 41.63 ms | 76.62 ms | 13948.30 ms | 182.0x |
+| Inverse, 100k points, STANDARD mask | batch API vs upstream loop | 34.63 ms | 68.66 ms | 12158.00 ms | 177.1x |
+| Direct, 100k points, all outputs | batch API vs upstream loop | 14.44 ms | 31.16 ms | 6124.53 ms | 196.6x |
+| ArcDirect, 100k points, all outputs | batch API vs upstream loop | 14.49 ms | 28.41 ms | 5611.53 ms | 197.5x |
+| GeodesicLine.Position, 20k calls | scalar API, one line | 124.14 ms | 120.93 ms | 176.17 ms | 1.5x |
+| GeodesicLine.Positions, 100k | batch API vs upstream loop | 20.23 ms | 17.35 ms | 902.58 ms | 52.0x |
+| PolygonArea, 20k vertices (AddPoints) | batch API vs upstream loop | 47.54 ms | 46.55 ms | 2585.09 ms | 55.5x |
+| PolygonArea, 20k vertices (AddPoint) | scalar API on both sides | 95.85 ms | 90.86 ms | 2596.93 ms | 28.6x |
 
-Every `before`/`after` pair above is inside the same build's own run-to-run
-spread except `GeodesicLine.Positions`, whose two runs land at opposite ends of
-it; none of them is evidence for or against the unroll. The honest statement is
-that the unroll move is invisible in this table and its case is made on the
-kernel alone, in the next section.
+Only the `after` and `upstream` columns are this session's measurements. The
+`before` column is **not**: it is the unroll pass's earlier run of the same
+build without the unroll, kept only because no `bench` run of the pre-unroll
+build was made in this session, and it is marked as unverified. Read the
+`after` column as the shipped numbers, and do not use `before` to size the
+unroll -- the kernel-level A/B further down is the measurement for that.
+
+No `before`/`after` pair in this table is same-build any more: the `after` and
+`upstream` columns were re-measured in this session, the `before` column was
+not, and none of the pairs is evidence for or against the unroll. The unroll's
+case is made on the kernel alone, in the next section.
 
 Reading the table honestly:
 
 * The batch rows are not a like-for-like fight. Upstream has no batch API, so
   its column is the cost of 100,000 Python function calls, and most of the
   speedup is the interpreter loop that disappears.
-* The scalar rows are. `Inverse` in a Python loop went from 5.5x to 9.9x, but
-  almost none of that is arithmetic -- the arithmetic was already 5x faster
-  and the remaining cost was the interpreter on both sides. It is the
-  Python-side glue around the FFI call that this pass removed (see *How it
-  works*): numpy element access, address lookups and per-call library
-  lookups were costing about 2 us a call, twice the kernel.
+* The scalar rows are. `Inverse` in a Python loop measured 11.1x in this
+  session (245.69 against 2724.12 ms), so most of that is not arithmetic --
+  the arithmetic was already several times faster and the remaining cost was
+  the interpreter on both sides. It is the Python-side glue around the FFI call
+  that the unroll pass removed (see *How it works*): numpy element access,
+  address lookups and per-call library lookups were costing about 2 us a call,
+  twice the kernel. The "5.5x to 9.9x" this bullet used to quote is not
+  reproduced here; only 11.1x was measured.
 * `GeodesicLine.Position` is the one case that is still close to a wash
-  (1.6x), and it is close to its floor. A single position is about 0.23 us of
-  arithmetic; the call is 5.3 us, of which 2.5 us is the ctypes boundary
-  itself -- a nine-argument `ctypes` call costs about 2.5 us whatever is on
-  the other end of it. Everything above that has been taken out. Use
-  `Positions` for anything repeated: it is 89-93x.
+  (1.5x this session, 176.17 against 120.93 ms for 20,000 calls). It is close
+  to its floor: `bench/profile.py` puts a single `Position` at 6.27 us, of
+  which 2.96 us is the `mg_line_position` call itself (0.57 us of it the
+  kernel), and the bare ctypes boundary is 2.39 us -- a nine-argument
+  `ctypes` call costs about 2.5 us whatever is on the other end of it. Use
+  `Positions` for anything repeated: it is 52.0x here.
 * `PolygonArea` barely moved, and that is expected. `AddPoints` is a running
   Shewchuk accumulation, so it cannot be split across workers at all, and
   `AddPoint` is one ctypes call and one geodesic per vertex with no
@@ -287,56 +311,76 @@ The numbers below come from `bench/parallel_ab.py`, which measures three
 builds that differ only in this constant, one process per cell: a **serial**
 build (threshold out of reach), the **before** tree (`43354b2`: cap 32, one
 threshold of 8192) and **new** (this tree). Public calls, warm pool, min of
-11, one run each, ms:
+11, median of two rounds in opposite order. Re-run in this session on
+2026-11-10 with `bench/parallel_builds.py 43354b2` and then
+`bench/parallel_ab.py`; the rows below are that run (ms):
 
 | case | n | serial | before | new | new vs serial | new vs before |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| InversePairs | 8192 | 15.13 | 7.92 | 14.83 | 0.98x | 1.87x slower |
-| InversePairs | 16384 | 29.75 | 9.83 | 15.05 | 0.51x | 1.53x slower |
-| InversePairs | 65536 | 131.74 | 23.14 | 48.79 | 0.37x | 2.11x slower |
-| InversePairs | 100000 | 201.16 | 32.73 | 69.34 | 0.34x | 2.12x slower |
-| DirectMany | 8192 | 5.94 | 5.82 | 5.92 | 1.00x | 1.02x |
-| DirectMany | 16384 | 11.68 | 6.74 | 8.90 | 0.76x | 1.32x slower |
-| DirectMany | 100000 | 72.10 | 13.05 | 29.70 | 0.41x | 2.28x slower |
-| Positions | 8192 | 2.81 | 5.40 | 2.86 | 1.02x | **1.89x faster** |
-| Positions | 16384 | 5.59 | 5.35 | 6.43 | 1.15x | 1.20x slower |
-| Positions | 24576 | 8.46 | 5.47 | 7.57 | 0.89x | 1.39x slower |
-| Positions | 100000 | 36.69 | 8.36 | 15.74 | 0.43x | 1.88x slower |
+| InversePairs | 8192 | 14.62 | 8.13 | 14.45 | 0.99x | 1.78x slower |
+| InversePairs | 16384 | 29.76 | 10.09 | 14.61 | 0.49x | 1.45x slower |
+| InversePairs | 65536 | 130.25 | 23.32 | 48.11 | 0.37x | 2.06x slower |
+| InversePairs | 100000 | 209.53 | 33.18 | 73.02 | 0.35x | 2.20x slower |
+| DirectMany | 8192 | 5.98 | 5.93 | 6.09 | 1.02x | 1.03x |
+| DirectMany | 16384 | 11.72 | 6.76 | 8.99 | 0.77x | 1.33x slower |
+| DirectMany | 100000 | 71.33 | 12.66 | 28.54 | 0.40x | 2.25x slower |
+| Positions | 8192 | 2.85 | 5.02 | 2.91 | 1.02x | **1.72x faster** |
+| Positions | 16384 | 5.66 | 5.41 | 6.38 | 1.13x | 1.18x slower |
+| Positions | 24576 | 8.89 | 5.95 | 7.25 | 0.82x | 1.22x slower |
+| Positions | 100000 | 36.04 | 7.99 | 15.53 | 0.43x | 1.94x slower |
+
+Every size in the script is kept in the run; the four rows above are a subset
+of the 21 printed cells and were chosen to match this section's argument, not
+because the others failed. The omitted cells (`n = 4096` and `n = 20480` for
+all three kernels, `n = 24576` for inverse and direct) measure the same
+direction: 0.92-1.04x against serial at 4096 (within noise on every kernel),
+and 1.22-1.55x slower than the before tree at 20480-24576. No row contradicts
+the table. The one row that changed category is noted under the positions
+paragraph.
 
 **What the per-kernel thresholds fix.** One threshold for all three kernels is
 wrong at 8192 points, because the kernels differ about 3x per point and a
-launch does not. Positions is the clear case: the old build took 5.40 ms at
-8192 against 2.81 serial, and this tree stays serial and takes 2.86 -- **1.9x
+launch does not. Positions is the clear case: the old build took 5.02 ms at
+8192 against 2.85 serial, and this tree stays serial and takes 2.91 -- **1.72x
 removed**, and indistinguishable from the serial build in the same run.
-Direct at 8192 is unchanged (5.82 -> 5.92), so at that size it reads "no
+Direct at 8192 is unchanged (5.93 -> 6.09), so at that size it reads "no
 longer loses" rather than "rescued". Inverse is the opposite: it does win at
-8192 on the old build (7.92 against 15.13 serial), and this tree's 12288
+8192 on the old build (8.13 against 14.62 serial), and this tree's 12288
 threshold gives that size up, a deliberate step above the box's 3-4%
 run-to-run spread.
 
 **What the cap of 4 costs, and it is kept only because it is the rule.**
-Kernel only, 100k points, ms, on the same inputs:
+Kernel only, 100k points, ms, from `bench/parallel_sweep.py` run in this
+session on the shipped build (2026-11-10). All four kernels come from the same
+sweep:
 
-| workers | 1 | 2 | 4 | 8 | 16 | 24 | 32 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `mg_inverse`, before | 171.4 | 96.5 | 51.5 | 34.5 | 25.3 | 16.1 | 13.7 |
-| `mg_inverse`, new | 169.0 | 91.6 | 51.6 | 51.7 | 50.5 | 51.2 | 53.2 |
-| `mg_line_position`, before | 36.5 | 23.2 | 19.1 | 15.4 | 7.7 | 8.0 | 7.8 |
+| workers | 1 | 2 | 4 | 8 | 16 | 32 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mg_inverse` | 163.02 | 105.57 | 58.77 | 53.24 | 53.75 | 49.73 |
+| `mg_direct` | 67.84 | 48.81 | 28.74 | 30.56 | 27.01 | 25.57 |
+| `mg_arcdirect` | 65.70 | 47.65 | 26.81 | 24.40 | 28.98 | 24.10 |
+| `mg_line_position` | 37.74 | 29.70 | 19.41 | 18.93 | 15.62 | 16.68 |
 
-The old curve keeps falling to 32; this tree's is flat at 4 because the cap
-clamps it there, whatever count the caller passes. That is the whole of the
-100k rows above: at 100k, capping at 4 is **1.9-2.3x slower than the 32-worker
-build** on every batch entry point. It still beats serial (2.9x on inverse,
-2.4x on direct, 2.3x on Positions), so no path here loses to serial, but the
-largest size real callers pass is slower than it was before this pass. The
-cause is the cap, not the thresholds: at 4 workers the two builds are within
-noise of each other (51.5 vs 51.6 ms for the 100k inverse kernel), and the gap
-opens between 4 and 8.
+The 8-32 columns are not reachable through the public API, which clamps the
+caller's count to `MG_MAX_WORKERS` = 4; the sweep's direct kernel call passes
+the count straight through. On this box the extra workers from 4 to 32 buy
+1.18x on inverse, 1.12x on direct and 1.16x on the line kernel (and the line
+kernel is fastest at 16). The pre-pass curve this table used to carry (171.4 ms
+at 1 worker down to 13.7 ms at 32) does not reproduce here, so it is removed
+rather than compared against.
+
+The cap is the whole of the 100k rows above: at 100k the before tree (32
+workers) is **1.8-2.2x faster than this tree** on every batch entry point
+(2.20x inverse, 2.25x direct, 1.94x Positions in the A/B table). The current
+build still beats serial at 100k (2.8x on inverse, 2.4x on direct, 1.9x on
+Positions, kernel only, from the 1- vs 4-worker columns above), so no path here
+loses to serial, but the largest size real callers pass is slower than it was
+before this pass. The cause is the cap, not the thresholds.
 
 **The verdict, stated plainly.** Two changes are in this pass and they do not
 point the same way. The per-kernel thresholds are a measured win where the old
-build lost (Positions at 8192, 1.9x) and neutral at 100k. The 4-worker cap is
-a measured loss of 1.9-2.3x at 100k and 1.2-1.4x at 16-24k, shipped because
+build lost (Positions at 8192, 1.72x) and neutral at 100k. The 4-worker cap is
+a measured loss of 1.8-2.2x at 100k and 1.22-1.55x at 20-24k, shipped because
 the brief for this pass caps the host at 4 workers unless the benchmark shows
 more helps. The benchmark shows more helps, so this is recorded as the
 reversal the brief asks about rather than presented as a gain. `MG_MAX_WORKERS`
@@ -369,17 +413,20 @@ or a roughly-3% margin, not a three-significant-figure time.
 The public rows above cannot resolve a kernel change of a few percent: at 100k
 points the kernel is roughly a third of the `InversePairs` call, so 3% of the
 kernel is 1% of the row, and the row moves by 10% between runs. The kernel was
-therefore measured on its own -- one `ctypes` call into `mg_inverse` / `mg_direct`
-with a preallocated output block and no `_result` -- freshly built binaries,
-same locked box, alternating:
+therefore measured on its own: one `ctypes` call into `mg_inverse` /
+`mg_direct`, preallocated output block, no `_result`, freshly built binaries,
+one library per process with its sha256 asserted inside it, alternating. The
+unroll table was rebuilt in the verify pass (`bench/kernel_ab.py`) on the
+2026-11-10 tree under the machine-wide lock:
 
-| kernel only, 100,000 points | before | after | 32 workers |
-| --- | ---: | ---: | ---: |
-| `mg_inverse`, serial | 171.5-173.4 ms (3 runs) | 165.4-168.2 ms (3 runs) | 16.3-17.0 -> 15.8-16.4 ms |
-| `mg_direct`, serial | 67.4-70.5 ms | 69.0-71.9 ms | no change expected |
+| kernel only, 100,000 points | before (`c201134^`) | after (`c201134`) | |
+| --- | ---: | ---: | --- |
+| `mg_inverse` serial, lone | 163.02 ms | — | `bench/parallel_sweep.py`, this session |
+| `mg_direct` serial, lone | 67.84 ms | — | `bench/parallel_sweep.py`, this session |
+| `mg_inverse` + `mg_direct`, serial | 241.0 / 242.2 ms (2 runs) | 227.6 / 235.2 ms (2 runs) | `bench/kernel_ab.py`, this session |
 
-That is a repeatable **~3.5% off the serial `mg_inverse` kernel**. `mg_direct`
-was unchanged, which is consistent but is not a second proof: `mg_direct` calls
+That is a repeatable **~4% off the serial `mg_inverse` kernel**. `mg_direct`
+was unchanged, which is consistent but is not a separate proof: `mg_direct` calls
 `_C1f` once per `GeodesicLine` construction (`ported.mojo:1744`) and not on its
 per-point path, so a `_C1f` win there would be one call against a line setup and
 a `_GenPosition`, i.e. below the same 2% noise floor. Read the direct column as
@@ -407,35 +454,56 @@ that is silently short. That note has been added to `MOJO_NOTES.md`.
 `before` is this tree at the start of the pass (`git stash` of the source
 files only), `after` is the tree with the `geomath` array forms rewritten;
 both are single `pixi run bench` runs on the same box, with nothing else
-changed between them.
+changed between them. Only the `before` column is from that pass: the `after`
+and `upstream` columns below were re-measured in the verify pass of
+2026-11-10 (median of six `pixi run bench` runs) and replace the pass's own,
+which did not reproduce (e.g. `Inverse, 100k, all` 39.12 -> 76.62 ms).
 
 | case | note | before | after | upstream | speedup |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Inverse, 20k scalar calls (Python loop) | scalar API, STANDARD mask | 275.13 ms | 243.92 ms | 2742.77 ms | 11.2x |
-| Inverse, 100k points, all outputs | batch API vs upstream loop | 40.93 ms | 39.12 ms | 14073.32 ms | 359.7x |
-| Inverse, 100k points, STANDARD mask | batch API vs upstream loop | 39.48 ms | 38.68 ms | 12200.66 ms | 315.4x |
-| Direct, 100k points, all outputs | batch API vs upstream loop | 18.17 ms | 15.10 ms | 6317.16 ms | 418.2x |
-| ArcDirect, 100k points, all outputs | batch API vs upstream loop | 15.41 ms | 16.63 ms | 5968.98 ms | 359.0x |
-| GeodesicLine.Position, 20k calls | scalar API, one line | 119.89 ms | 139.56 ms | 190.13 ms | 1.4x |
-| GeodesicLine.Positions, 100k | batch API vs upstream loop | 13.31 ms | 8.30 ms | 930.93 ms | 112.2x |
-| PolygonArea, 20k vertices (AddPoints) | batch API vs upstream loop | 46.63 ms | 47.64 ms | 2744.08 ms | 57.6x |
-| PolygonArea, 20k vertices (AddPoint) | scalar API on both sides | 94.80 ms | 94.24 ms | 2791.52 ms | 29.6x |
+| Inverse, 20k scalar calls (Python loop) | scalar API, STANDARD mask | 275.13 ms | 245.69 ms | 2724.12 ms | 11.1x |
+| Inverse, 100k points, all outputs | batch API vs upstream loop | 40.93 ms | 76.62 ms | 13948.30 ms | 182.0x |
+| Inverse, 100k points, STANDARD mask | batch API vs upstream loop | 39.48 ms | 68.66 ms | 12158.00 ms | 177.1x |
+| Direct, 100k points, all outputs | batch API vs upstream loop | 18.17 ms | 31.16 ms | 6124.53 ms | 196.6x |
+| ArcDirect, 100k points, all outputs | batch API vs upstream loop | 15.41 ms | 28.41 ms | 5611.53 ms | 197.5x |
+| GeodesicLine.Position, 20k calls | scalar API, one line | 119.89 ms | 120.93 ms | 176.17 ms | 1.5x |
+| GeodesicLine.Positions, 100k | batch API vs upstream loop | 13.31 ms | 17.35 ms | 902.58 ms | 52.0x |
+| PolygonArea, 20k vertices (AddPoints) | batch API vs upstream loop | 46.63 ms | 46.55 ms | 2585.09 ms | 55.5x |
+| PolygonArea, 20k vertices (AddPoint) | scalar API on both sides | 94.80 ms | 90.86 ms | 2596.93 ms | 28.6x |
 
 Read those as a range, not a point. The box was carrying a load average around
-32 of 72 threads for both runs, so the same table moves several ms between
-runs: `GeodesicLine.Positions` reads 13.31 ms in `before` and 8.30 ms in
+32 of 72 threads for both runs of the pass, so the same table moves several ms
+between runs: `GeodesicLine.Positions` read 13.31 ms in `before` and 8.30 ms in
 `after`, and nothing in that path was touched (it calls neither the `atan2d`
 nor the `ang_diff` forms). `ArcDirect` and `GeodesicLine.Position` moved the
 other way by as much. So the two runs above are reported because they are the
-ones that were taken, not because they are a verdict on their own.
+ones that were taken, not because they are a verdict on their own; and the
+`before`/`after` pair is no longer same-build, so it cannot be read as one.
 
-The verdict rests on the interleaved piece-level A/B instead: `atan2d` and
-`ang_diff` are 10% faster on the same bits, and `InversePairs` at 100k comes
-out at 31.6-34.2 ms (`new`, minima of 25 runs in each of six fresh processes)
-against 32.4-40.1 ms (`old`); every other batch row is unchanged within the
-same spread. Nothing in `Direct`, `ArcDirect` or `Positions` was touched --
-they call neither form -- so their rows are the control for that, and they
-show the noise at the same time as the change.
+The SIMD pass's own verdict rested on an interleaved piece-level A/B, not on
+the whole-call table above. Re-run in this session:
+
+* **The pieces** (`bench/simd_piece_ab.py`, `geomath.py` at `43354b2^` against
+  this tree, interleaved, min per variant, both forms bit-identical on the
+  input used). At 100k/1M `atan2d_pair` is 1.07x/1.12x faster (`ang_diff`
+  1.05x/1.02x); `ang_normalize` and `lat_fix` are 1.00x on the 1M row, as the
+  controls should be. The "about 10%" claim holds for `atan2d` and is slightly
+  optimistic for `ang_diff`.
+* **The whole call** (`bench/inverse_ab.py`, pre-SIMD Python package against
+  this tree, same input, 25 runs per round, two rounds in opposite order).
+  Old 33.78 and 35.31 ms, new 37.71 and 35.08 ms; the minima are 33.78 (old)
+  against 35.08 (new). The pass's figure of 31.6-34.2 ms (new) against
+  32.4-40.1 ms (old) does **not** reproduce, and the new side does not win
+  here. The piece-level win is real; at the whole-call level it is inside this
+  box's noise today.
+* **The whole bench row** is 76.62 ms (median of six runs, table above); this
+  single-process interleaved A/B sees 34-38 ms because it runs on the
+  machine-wide lock rather than beside the other tenants. Both are honest
+  measurements of different conditions; do not mix them in one comparison.
+
+Nothing in `Direct`, `ArcDirect` or `Positions` was touched -- they call
+neither form -- so their rows are the control, and they show the noise at the
+same time as the change.
 
 
 ### What did not pay, and why
@@ -491,7 +559,11 @@ against a `sin`, a `cos` or a `sqrt`, and the vector forms of those in this
 toolchain are not the `libm` ones the port calls: the agreement with upstream
 down to the last place comes from calling the same `libm`, and a vectorised
 `sin` would give it up. So widening the vector buys at most a few percent of
-a kernel that is already 3-7x faster than upstream per point.
+a kernel that is already several times faster than upstream per point. (The
+old "3-7x per point on the kernel alone" figure is not reused: an untimed
+comparison of kernel against a Python loop is not what that phrase means, and
+the whole-call numbers are the honest ones -- 182x on `InversePairs` and 52x on
+`Positions` in the table at the top.)
 
 `_SinCosSeries` was checked and is *not* a candidate for a different reason:
 it is a Clenshaw recurrence, every iteration depends on the two before it, so
@@ -504,27 +576,28 @@ be vectorised without changing the result.
 The one genuinely contiguous elementwise stage this port has is the NumPy
 post-processing of a batch result, in `python/mojogeographiclib/geomath.py`:
 
-| stage | what it is | 100k before -> after | 1M before -> after |
-| --- | --- | ---: | ---: |
-| `atan2d_pair` (azi1, azi2) | two quadrant fixes per call, 3 passes each | 184.32 -> 165.13 us* | 178.3 -> 159.7 ms |
-| `ang_diff` | exact two-sum reduction of the longitude difference | 83.15 -> 76.25 us* | 79.5 -> 69.9 ms |
-| `ang_normalize` | one IEEE remainder plus the +-180 fix | 13.97 -> 13.85 us* | 15.0 -> 14.8 ms |
-| `lat_fix` | one `np.where` | 1.93 -> 1.93 us* | 1.9 -> 1.9 ms |
+| stage | what it is | 100k before -> after | 1M before -> after | ratio |
+| --- | --- | ---: | ---: | ---: |
+| `atan2d_pair` (azi1, azi2) | two quadrant fixes per call, 3 passes each | 15.76 -> 14.68 ms | 183.3 -> 163.6 ms | 1.07x / 1.12x |
+| `ang_diff` | exact two-sum reduction of the longitude difference | 5.04 -> 4.78 ms | 59.7 -> 58.5 ms | 1.05x / 1.02x |
+| `ang_normalize` | one IEEE remainder plus the +-180 fix | 1.02 -> 1.00 ms | 8.31 -> 8.34 ms | 1.02x / 1.00x |
+| `lat_fix` | one `np.where` | 0.73 -> 0.73 ms | 6.41 -> 6.39 ms | 1.00x / 1.00x |
 
-`*` That column was taken while the box was quiet, and its absolute values are
-about 50 us higher per piece than the same measurement repeated under load;
-the *ratios* are the repeatable part. `ang_normalize` and `lat_fix` are not
-changed by this pass; they are in the table because they were measured as the
-control.
+Re-measured 2026-11-10 with `bench/simd_piece_ab.py`, on a box carrying a
+load average of 18-20 of 72 threads, so the absolute times are larger than the
+older, quieter run this table used to carry; the ratios are the repeatable
+part. `ang_normalize` and `lat_fix` are not changed by this pass; they are in
+the table because they were measured as the control.
 
-Those are piece-level numbers, alternated old/new within one process, 25
-repetitions each, min per variant -- the box's whole-call spread is far too
-wide to see a 1-2 ms change (see the note under *Thin margins*). Both
-`atan2d` and `ang_diff` are about 10% faster on the same arithmetic, and both
-are **bit-identical**: every output field was compared with the looping and
-unrolled builds' `geomath` forms with `np.array_equal` on the raw uint64 view,
-and that check is now a test (`tests/test_geomath.py`,
-`test_array_forms_cover_every_tail_length`).
+Those are piece-level numbers, alternated old/new within one process, 15
+repetitions each order, min per variant -- the box's whole-call spread is far
+too wide to see a 1-2 ms change (see the note under *Thin margins*). Both
+`atan2d` and `ang_diff` are faster on the same arithmetic, by about 7% and 5%
+at 100k, and both are **bit-identical**: every output field was compared with
+the looping and unrolled builds' `geomath` forms with `np.array_equal` on the
+raw uint64 view, and that check is now a test (`tests/test_geomath.py`,
+`test_array_forms_cover_every_tail_length`). `bench/simd_piece_ab.py` repeats
+the same bit check on its own inputs before it times anything.
 
 What the change actually is, in the idiom of this file:
 
@@ -597,7 +670,7 @@ skips a per-call signature lookup. A/B'd in-process on `line.Position` it came
 out 5.09 us against 4.92 us -- no better, in one run slightly worse. Reverted.
 
 **The GPU.** The host API is available (`max.gpu.host.DeviceContext`). At the
-time of the gate check above the card reported 4309 MiB free, not the 15.8 GB
+time of the gate check the card reported 4309 MiB free, not the 15.8 GB
 an earlier revision of this paragraph quoted; that figure was a stale reading
 of a differently-loaded shared box and is corrected here. Either way the phase
 is skipped on the flops/byte gate as well, so nothing turned on it.
@@ -611,7 +684,7 @@ worst. The 100k points would also have to be copied up (3.2 MB) and back
 give up bit-parity; the CPU port is the answer, and it is a deliberate one.
 
 **GPU phase: skipped, gate failed (checked 2026-11-10).** The gate was run in
-this order and both checks failed, so no kernel was written, nothing was
+this order and the first check failed, so no kernel was written, nothing was
 measured before/after, and `src/`, `tests/` and the Python package are
 unchanged by this phase.
 
@@ -625,12 +698,15 @@ unchanged by this phase.
    0.6-0.7, `Inverse` loop 0.04), and `analysis.md` already closes the phase
    with *"No GPU phase"* on exactly this figure. A GPU transfer at 100k points
    is 3.2 MB up and 8 MB back (derived from the same ABI widths) against a
-   23.79 ms CPU `_run`, and at 1M it is 144 MB against 411 ms — the copy alone
+   23.79 ms CPU `_run` as measured when `bench/analysis.md` was written, and at
+   1M it is 144 MB against 411 ms -- the copy alone
    is the budget, and the flops are `sin`/`cos`/`atan2` inside a
    data-dependent Newton loop.
 2. *Shared device capacity.*
-   `nvidia-smi --query-gpu=memory.free --format=csv,noheader` reports
-   **`4309 MiB`** free at the time of the check. The gate skips the phase under
+   `nvidia-smi --query-gpu=memory.free --format=csv,noheader` reported
+   **`4309 MiB`** free at the time of the gate check and **`4307 MiB`** when
+   the verify pass repeated it (2026-11-10), so the reading is stable. The gate
+   skips the phase under
    4000 MiB; 4309 MiB passes the letter of that check but leaves 309 MiB of
    headroom over the floor, well inside what other tenants on this shared box
    take between two runs, and under the 2 GB per-allocation cap only one
@@ -641,10 +717,11 @@ Verdict: **CPU only for the batch kernels.** There is no
 memory-bandwidth-bound (0.35-0.47 GB/s derived against a machine far faster
 than that); its heavy rows are compute plus Python/numpy glue, which
 `analysis.md` assigns to `simd` and `unroll`, not `gpu`. `_result` at 1M is
-231.47 ms over eight numpy passes and is already vectorised on the CPU; the
-GPU would add two 80 MB transfers to it. If the capacity check is repeated
-when the box is quiet, the flops/byte check still decides the same way, so
-re-running it will not change the verdict.
+231.47 ms over eight numpy passes as measured in `bench/analysis.md` (not
+re-taken here) and is already vectorised on the CPU; the
+GPU would add two 80 MB transfers to it. The flops/byte check decides the same
+way whether or not the card is free, so a quieter box will not change the
+verdict.
 
 ## How it works
 
