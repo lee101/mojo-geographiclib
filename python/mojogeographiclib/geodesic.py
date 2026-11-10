@@ -84,7 +84,8 @@ import sys
 
 import numpy as np
 from mojogeographiclib import _lib
-from mojogeographiclib.geomath import Math, ang_diff, ang_normalize, atan2d, lat_fix
+from mojogeographiclib.geomath import (
+  Math, ang_diff, ang_normalize, atan2d, atan2d_pair, lat_fix)
 from mojogeographiclib.constants import Constants
 from mojogeographiclib.geodesiccapability import GeodesicCapability
 
@@ -270,8 +271,15 @@ class Geodesic:
     result['a12'] = out_arr(a12)
     if outmask & Geodesic.DISTANCE: result['s12'] = out_arr(s12)
     if outmask & Geodesic.AZIMUTH:
-      result['azi1'] = out_arr(azi(salp1, calp1))
-      result['azi2'] = out_arr(azi(salp2, calp2))
+      if vector:
+        # azi1 and azi2 are independent, so both pairs run inside one
+        # Python-level loop over the same body (geomath.atan2d_pair).
+        azi1_v, azi2_v = atan2d_pair(salp1, calp1, salp2, calp2)
+        result['azi1'] = out_arr(azi1_v)
+        result['azi2'] = out_arr(azi2_v)
+      else:
+        result['azi1'] = out_arr(azi(salp1, calp1))
+        result['azi2'] = out_arr(azi(salp2, calp2))
     if outmask & Geodesic.REDUCEDLENGTH: result['m12'] = out_arr(m12)
     if outmask & Geodesic.GEODESICSCALE:
       result['M12'] = out_arr(M12); result['M21'] = out_arr(M21)

@@ -316,6 +316,42 @@ count here is unrolled by hand, with a `comptime assert` on the order so a
 change of `GEOGRAPHICLIB_GEODESIC_ORDER` is a build error rather than a series
 that is silently short. That note has been added to `MOJO_NOTES.md`.
 
+### The SIMD pass: the two `pixi run bench` runs
+
+`before` is this tree at the start of the pass (`git stash` of the source
+files only), `after` is the tree with the `geomath` array forms rewritten;
+both are single `pixi run bench` runs on the same box, with nothing else
+changed between them.
+
+| case | note | before | after | upstream | speedup |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Inverse, 20k scalar calls (Python loop) | scalar API, STANDARD mask | 275.13 ms | 243.92 ms | 2742.77 ms | 11.2x |
+| Inverse, 100k points, all outputs | batch API vs upstream loop | 40.93 ms | 39.12 ms | 14073.32 ms | 359.7x |
+| Inverse, 100k points, STANDARD mask | batch API vs upstream loop | 39.48 ms | 38.68 ms | 12200.66 ms | 315.4x |
+| Direct, 100k points, all outputs | batch API vs upstream loop | 18.17 ms | 15.10 ms | 6317.16 ms | 418.2x |
+| ArcDirect, 100k points, all outputs | batch API vs upstream loop | 15.41 ms | 16.63 ms | 5968.98 ms | 359.0x |
+| GeodesicLine.Position, 20k calls | scalar API, one line | 119.89 ms | 139.56 ms | 190.13 ms | 1.4x |
+| GeodesicLine.Positions, 100k | batch API vs upstream loop | 13.31 ms | 8.30 ms | 930.93 ms | 112.2x |
+| PolygonArea, 20k vertices (AddPoints) | batch API vs upstream loop | 46.63 ms | 47.64 ms | 2744.08 ms | 57.6x |
+| PolygonArea, 20k vertices (AddPoint) | scalar API on both sides | 94.80 ms | 94.24 ms | 2791.52 ms | 29.6x |
+
+Read those as a range, not a point. The box was carrying a load average around
+32 of 72 threads for both runs, so the same table moves several ms between
+runs: `GeodesicLine.Positions` reads 13.31 ms in `before` and 8.30 ms in
+`after`, and nothing in that path was touched (it calls neither the `atan2d`
+nor the `ang_diff` forms). `ArcDirect` and `GeodesicLine.Position` moved the
+other way by as much. So the two runs above are reported because they are the
+ones that were taken, not because they are a verdict on their own.
+
+The verdict rests on the interleaved piece-level A/B instead: `atan2d` and
+`ang_diff` are 10% faster on the same bits, and `InversePairs` at 100k comes
+out at 31.6-34.2 ms (`new`, minima of 25 runs in each of six fresh processes)
+against 32.4-40.1 ms (`old`); every other batch row is unchanged within the
+same spread. Nothing in `Direct`, `ArcDirect` or `Positions` was touched --
+they call neither form -- so their rows are the control for that, and they
+show the noise at the same time as the change.
+
+
 ### What did not pay, and why
 
 **Unrolling the other fixed-trip loops.** Only the loops above were kept. The
@@ -359,7 +395,7 @@ contract=off` keeps the chain semantics visible; there was no remaining check on
 an index the bound already proves in range. Nothing to remove.
 
 
-**SIMD.** There is no contiguous elementwise loop in the kernels to widen.
+**SIMD.** There is no contiguous elementwise loop in the *kernels* to widen.
 `_GenInverse` is a Newton iteration whose trip count depends on the point,
 with a per-point Clenshaw scratch (`C1a`, `C2a`, `C3a`) recomputed inside
 `_Lengths` for every point, and `_GenDirect` rebuilds a whole `GeodesicLine`
@@ -371,13 +407,103 @@ down to the last place comes from calling the same `libm`, and a vectorised
 `sin` would give it up. So widening the vector buys at most a few percent of
 a kernel that is already 3-7x faster than upstream per point.
 
+`_SinCosSeries` was checked and is *not* a candidate for a different reason:
+it is a Clenshaw recurrence, every iteration depends on the two before it, so
+there is no independent work to overlap and `reduce_add` has nothing to sum.
+`AddPoints` is a Shewchuk accumulation whose order is the answer. Neither may
+be vectorised without changing the result.
+
+### The SIMD pass: what it changed
+
 The one genuinely contiguous elementwise stage this port has is the NumPy
-post-processing of a batch result -- `ang_diff`, `lat_fix`, `atan2d` -- and
-`bench/profile.py` measures it at about 19 ms against a 22 ms kernel for 100k
-points. A fused SIMD pass would remove most of that, but half of `atan2d` is
-`np.arctan2` (3.9 ms of its 8.4 ms) with no SIMD form that keeps `libm`'s
-result, and the rows it would help are already 265-357x. It was measured and
-left out.
+post-processing of a batch result, in `python/mojogeographiclib/geomath.py`:
+
+| stage | what it is | 100k before -> after | 1M before -> after |
+| --- | --- | ---: | ---: |
+| `atan2d_pair` (azi1, azi2) | two quadrant fixes per call, 3 passes each | 184.32 -> 165.13 us* | 178.3 -> 159.7 ms |
+| `ang_diff` | exact two-sum reduction of the longitude difference | 83.15 -> 76.25 us* | 79.5 -> 69.9 ms |
+| `ang_normalize` | one IEEE remainder plus the +-180 fix | 13.97 -> 13.85 us* | 15.0 -> 14.8 ms |
+| `lat_fix` | one `np.where` | 1.93 -> 1.93 us* | 1.9 -> 1.9 ms |
+
+`*` That column was taken while the box was quiet, and its absolute values are
+about 50 us higher per piece than the same measurement repeated under load;
+the *ratios* are the repeatable part. `ang_normalize` and `lat_fix` are not
+changed by this pass; they are in the table because they were measured as the
+control.
+
+Those are piece-level numbers, alternated old/new within one process, 25
+repetitions each, min per variant -- the box's whole-call spread is far too
+wide to see a 1-2 ms change (see the note under *Thin margins*). Both
+`atan2d` and `ang_diff` are about 10% faster on the same arithmetic, and both
+are **bit-identical**: every output field was compared with the looping and
+unrolled builds' `geomath` forms with `np.array_equal` on the raw uint64 view,
+and that check is now a test (`tests/test_geomath.py`,
+`test_array_forms_cover_every_tail_length`).
+
+What the change actually is, in the idiom of this file:
+
+* **`ang_diff`**: `_sum_ef` wrote its correction with a full-length
+  `np.where(s == 0, s, ...)`; now the correction is materialised once and the
+  `s == 0` entries are set by a boolean index assignment, which is one pass
+  and one temporary fewer. The final
+  `np.where(fix, np.copysign(d, np.where(t == 0, y - x, -t)), d)` nested a
+  full-length `where` inside another; the sign source is now formed once and
+  the copysign selects on it in place.
+* **`atan2d`**: the old form built an int64 quadrant vector
+  (`np.where(...).astype(np.int64)`) and ran four float64 `np.where` passes
+  against it. The quadrant is now carried in three boolean masks, and the
+  three fixes are applied as disjoint mask writes (`q2 & neg`, `~q2 & neg`,
+  `q2 & ~neg`) instead of one pass per quadrant. Same branches, same
+  arithmetic, same bits -- and `np.arange`-free, so no int64 temporary at all.
+* **`atan2d_pair`**: a result dict always wants `azi1` and `azi2` together.
+  They are independent, so both pairs are computed inside one Python-level
+  loop (`tuple(_atan2d_body(y, x) for y, x in ...)`); the interim mask arrays
+  are then recycled between the two pairs instead of a fresh set being asked
+  of the allocator.
+
+There is no `simd_width_of`/`load[width=W]` here to choose: these stages are
+already numpy's own AVX2 loops (this box has AVX2, no AVX-512), and the two
+pieces that dominate them -- `np.arctan2` and `np.rint` -- have to call the
+same `libm` to keep the last-place agreement with upstream. The advice about
+`SIMD` having no `.min()`/`.max()` and about `comptime W` applies to a Mojo
+kernel, and this pass found no kernel loop to put one in; see `mg_inverse`
+below.
+
+**What was measured and reverted.** None of these were faster at the caller's
+size, so they are not in the tree:
+
+* Removing `b.copy()` from `_run` and keeping the scratch buffer. The copy is
+  a 0.78 ms memmove at 100k (0.78 ms of a 16 ms `_run` was already recorded in
+  `bench/analysis.md`), but it is the guarantee that the caller owns the
+  result: without it the next call on the same thread overwrites what the
+  caller is holding. Not a speed change worth that contract. Reverted.
+* A fused single-pass copy of both output curves in `_run` (one pass over
+  the scratch buffer writing the 10 fields in one go instead of 10 slice
+  views). The slice views are 1.8 us; there is no pass to save. Reverted.
+* Fusing `lat_fix(lat1)` and `lat_fix(lat2)` into one pass over two arrays.
+  Measured 0.83 -> 0.86 us at 100k: `np.where` has no `out=`, so a fused form
+  needs an extra `copyto` for each array and lands in the same place.
+  Reverted.
+* `ang_normalize` as `np.copysign(y, np.where(abs(y) == 180, x, y))`
+  instead of `np.where(abs(y) == 180, np.copysign(180, x), y)`. The equation
+  is right, but at 1M the extra `copysign` pass costs more than the `np.where`
+  temporary it removes: 15.0 vs 14.8 ms. Reverted to the plain `np.where`, so
+  `ang_normalize` is unchanged by this pass.
+* A Mojo SIMD kernel for the tail, with `simd_width_of[DType.float64]()`, a
+  `W`-wide `load`/`store` body and a scalar tail loop. It was scoped, not
+  built, because the numbers above say there is nothing for it: the tail
+  stages it could cover that are not `libm` calls (`lat_fix`,
+  `ang_normalize`) are 0.85 us of a 35 ms call at 100k, and the two that
+  dominate (`atan2d`, `ang_diff`) are `np.arctan2` and a double-double `rint`
+  series that must stay `libm` for the last-place agreement. The kernel side
+  has nothing to widen either: `inv_range` / `gendir_range` in `src/capi.mojo`
+  store the 10 (9) result fields per point into a field-major block, which is
+  a strided write, not a contiguous pass. Recorded here so the next pass does
+  not redo the measurement.
+* Hand-unrolling the two-iteration `atan2d_pair` loop, and a separate
+  `np.copyto` body per pair. Both are the same five passes in the same order;
+  the only difference measured was allocator noise.
+
 
 **ctypes calling conventions.** Calling the kernels through a `CFUNCTYPE`
 prototype instead of `getattr(lib, name)` was tried, on the theory that it

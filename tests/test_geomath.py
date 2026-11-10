@@ -124,3 +124,60 @@ def test_array_atan2d_all_quadrants():
     for x in v:
         for y in v:
             assert same(float(mg.atan2d(x, y)), ug.Math.atan2d(float(x), float(y)))
+
+
+# ---------------------------------------------------------------- tail lengths
+# The batch array forms are elementwise, and the batch entry points call them
+# with whatever length the caller passed.  These sizes are the ones that sit
+# on the edges of a vector width W: 0, 1, W-1, W, W+1, and a large prime, so
+# every shape of last-block remainder is exercised.  Each result is checked
+# against the scalar mirror upstream's own Math, element by element, and the
+# two-pair form against two single calls bit for bit.
+W = 4  # the vector width of the float64 batches on this port's x86-64 target
+
+
+def _tail_inputs(n, seed):
+    rng = np.random.default_rng(seed)
+    x = np.concatenate([rng.uniform(-400.0, 400.0, max(n - 3, 0)),
+                        [90.0, 180.0, 91.0]])[:n]
+    y = np.concatenate([rng.uniform(-1.0, 1.0, max(n - 3, 0)),
+                        [45.0, -180.0, 0.0]])[:n]
+    return np.ascontiguousarray(x), np.ascontiguousarray(y)
+
+
+@pytest.mark.parametrize("n", [0, 1, W - 1, W, W + 1, 100_003])
+def test_array_forms_cover_every_tail_length(n):
+    x, y = _tail_inputs(n, n)
+    assert x.size == n and y.size == n
+
+    got = mg.ang_normalize(x)
+    assert got.size == n
+    for i in range(n):
+        assert same(float(got[i]), ug.Math.AngNormalize(float(x[i]))), ("ang_normalize", i)
+
+    got = mg.lat_fix(x)
+    assert got.size == n
+    for i in range(n):
+        assert same(float(got[i]), ug.Math.LatFix(float(x[i]))), ("lat_fix", i)
+
+    got = mg.atan2d(x, y)
+    assert got.size == n
+    for i in range(n):
+        assert same(float(got[i]), ug.Math.atan2d(float(x[i]), float(y[i]))), ("atan2d", i)
+
+    d, t = mg.ang_diff(x, y)
+    assert d.size == n and t.size == n
+    for i in range(n):
+        want_d, want_t = ug.Math.AngDiff(float(x[i]), float(y[i]))
+        assert same(float(d[i]), want_d), ("ang_diff d", i)
+        assert same(float(t[i]), want_t), ("ang_diff t", i)
+
+
+@pytest.mark.parametrize("n", [0, 1, W - 1, W, W + 1, 100_003])
+def test_atan2d_pair_is_two_single_calls_bit_for_bit(n):
+    x, y = _tail_inputs(n, 7 * n + 1)
+    a, b = mg.atan2d_pair(x, y, y, x)
+    single_a, single_b = mg.atan2d(x, y), mg.atan2d(y, x)
+    assert a.shape == b.shape == (n,)
+    assert a.view(np.uint64).tobytes() == single_a.view(np.uint64).tobytes()
+    assert b.view(np.uint64).tobytes() == single_b.view(np.uint64).tobytes()

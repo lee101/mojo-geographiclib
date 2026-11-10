@@ -304,3 +304,54 @@ def test_add_points_matches_a_loop():
         b.AddPoint(la, lo)
     assert a.num == b.num == n
     assert a.Compute() == b.Compute()
+
+
+# ---------------------------------------------------------------- tail lengths
+# The batch entry points' Python tail (the numpy result assembly) is
+# elementwise and length-agnostic, but it is called with whatever length the
+# caller passed.  These are the lengths that sit on the edges of a vector
+# width W -- 0, 1, W-1, W, W+1 -- plus a large prime, so a short last block is
+# always in play.  Every output field is compared bit for bit with the
+# single-point API, which is the same arithmetic without the tail.
+W = 4
+
+
+@pytest.mark.parametrize("n", [0, 1, W - 1, W, W + 1, 100_003])
+def test_batch_entry_points_cover_every_tail_length(n):
+    g = Geodesic.WGS84
+    rng = np.random.default_rng(n)
+    lat1 = np.ascontiguousarray(np.degrees(np.arcsin(rng.uniform(-1, 1, n))))
+    lon1 = np.ascontiguousarray(rng.uniform(-180, 180, n))
+    lat2 = np.ascontiguousarray(np.degrees(np.arcsin(rng.uniform(-1, 1, n))))
+    lon2 = np.ascontiguousarray(rng.uniform(-180, 180, n))
+    azi1 = np.ascontiguousarray(rng.uniform(-180, 180, n))
+    s12 = np.ascontiguousarray(rng.uniform(-2e7, 2e7, n))
+    a12 = np.ascontiguousarray(rng.uniform(-180, 180, n))
+    line = g.Line(37.0, -122.0, 51.0, g.ALL)
+
+    pairs = g.InversePairs(lat1, lon1, lat2, lon2, g.ALL)
+    many = g.DirectMany(lat1, lon1, azi1, s12, g.ALL)
+    arcs = g.ArcDirectMany(lat1, lon1, azi1, a12, g.ALL)
+    pos = line.Positions(s12, line.caps)
+    apos = line.ArcPositions(a12, line.caps)
+    for d in (pairs, many, arcs, pos, apos):
+        for k, v in d.items():
+            assert v.shape == (n,), (k, n)
+    assert len(pairs) == len(many) == len(arcs) == len(pos) == len(apos)
+
+    for i in range(n):
+        one = g.Inverse(lat1[i], lon1[i], lat2[i], lon2[i], g.ALL)
+        for k in one:
+            assert pairs[k][i] == one[k], ("InversePairs", n, i, k)
+        one = g.Direct(lat1[i], lon1[i], azi1[i], s12[i], g.ALL)
+        for k in one:
+            assert many[k][i] == one[k], ("DirectMany", n, i, k)
+        one = g.ArcDirect(lat1[i], lon1[i], azi1[i], a12[i], g.ALL)
+        for k in one:
+            assert arcs[k][i] == one[k], ("ArcDirectMany", n, i, k)
+        one = line.Position(s12[i], line.caps)
+        for k in one:
+            assert pos[k][i] == one[k], ("Positions", n, i, k)
+        one = line.ArcPosition(a12[i], line.caps)
+        for k in one:
+            assert apos[k][i] == one[k], ("ArcPositions", n, i, k)

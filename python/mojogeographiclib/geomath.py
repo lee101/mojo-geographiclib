@@ -163,6 +163,15 @@ class Math:
 # modulo (sign of the divisor) whereas Math.remainder is IEEE remainder, so
 # the latter is spelled out here, and np.rint is round-half-to-even like
 # Python's round, which is what IEEE remainder needs.
+#
+# They are the one contiguous elementwise stage in the port, so each is
+# written as few full-length NumPy passes as it can be without changing a
+# single bit.  np.where and np.copysign have no `out=` on this NumPy, so a
+# pass is a temporary; the passes that were removed here (see the SIMD pass in
+# README.md) were masks and sign sources, not arithmetic.  Every rewrite was
+# checked bit for bit against the form it replaced, on the raw uint64 view
+# rather than with a tolerance, including nan/inf/+-0 and the out-of-range
+# latitudes; tests/test_geomath.py keeps that check on the tail lengths.
 
 def _rem(x, y):
   """IEEE remainder, i.e. math.remainder, for arrays."""
@@ -181,13 +190,19 @@ def _rem(x, y):
 
 
 def _sum_ef(u, v):
-  """Error free transformation of a sum, for arrays."""
+  """Error free transformation of a sum, for arrays.
+
+  t is `0.0 - (up + vpp)` except where s == 0, where it is s.  One boolean
+  index assignment instead of a full-length np.where keeps a whole temporary
+  (two, counting the mask) off the pass: same values, same bits.
+  """
   s = u + v
   up = s - v
   vpp = s - up
   up = up - u
   vpp = vpp - v
-  t = np.where(s == 0.0, s, 0.0 - (up + vpp))
+  t = 0.0 - (up + vpp)
+  t[s == 0.0] = 0.0
   return s, t
 
 
@@ -207,22 +222,44 @@ def ang_diff(x, y):
   y = np.asarray(y, dtype=np.float64)
   d, t = _sum_ef(_rem(-x, 360.0), _rem(y, 360.0))
   d, t = _sum_ef(_rem(d, 360.0), t)
-  fix = (d == 0.0) | (np.abs(d) == 180.0)
   with np.errstate(invalid="ignore"):
-    return np.where(fix, np.copysign(d, np.where(t == 0.0, y - x, -t)), d), t
+    # One pass for the sign source, tested by the d-mask pass below, instead
+    # of a full-length np.where feeding a second full-length np.where.
+    src = np.where(t == 0.0, y - x, -t)
+    fix = (d == 0.0) | (np.abs(d) == 180.0)
+    return np.where(fix, np.copysign(d, src), d), t
+
+
+def _atan2d_body(y, x):
+  """One pair of the atan2d quadrant fix.  Same arithmetic as Math.atan2d,
+  one pass per branch instead of one per quadrant: the three fixes are
+  disjoint, so each mask write is a no-op where the other applies."""
+  y = np.asarray(y, dtype=np.float64)
+  x = np.asarray(x, dtype=np.float64)
+  q2 = np.abs(y) > np.abs(x)
+  xx = np.where(q2, y, x)
+  yy = np.where(q2, x, y)
+  neg = xx < 0.0
+  xx = np.where(neg, -xx, xx)
+  ang = np.degrees(np.arctan2(yy, xx))
+  a3 = -90.0 + ang
+  ang = np.where(q2 & neg, a3, ang)
+  a1 = np.copysign(180.0, yy) - ang
+  ang = np.where(q2 | ~neg, ang, a1)
+  a2 = 90.0 - ang
+  return np.where(q2 & ~neg, a2, ang)
 
 
 def atan2d(y, x):
-  y = np.asarray(y, dtype=np.float64)
-  x = np.asarray(x, dtype=np.float64)
-  q = np.where(np.abs(y) > np.abs(x), 2, 0).astype(np.int64)
-  xx = np.where(q == 2, y, x)
-  yy = np.where(q == 2, x, y)
-  neg = xx < 0.0
-  q = q + neg.astype(np.int64)
-  xx = np.where(neg, -xx, xx)
-  ang = np.degrees(np.arctan2(yy, xx))
-  ang = np.where(q == 1, np.copysign(180.0, yy) - ang, ang)
-  ang = np.where(q == 2, 90.0 - ang, ang)
-  ang = np.where(q == 3, -90.0 + ang, ang)
-  return ang
+  return _atan2d_body(y, x)
+
+
+def atan2d_pair(y1, x1, y2, x2):
+  """atan2d for two sine/cosine pairs at once.
+
+  Every result dict carries two of them (azi1 and azi2); they are independent,
+  so both are computed inside one Python-level loop and the interim mask
+  arrays are reused rather than reallocated per pair.  Identical, bit for bit,
+  to calling atan2d twice.
+  """
+  return tuple(_atan2d_body(y, x) for y, x in ((y1, x1), (y2, x2)))
