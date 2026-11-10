@@ -231,12 +231,14 @@ def test_batch_line_positions_match_the_scalar_ones():
 
 
 # --------------------------------------------------------------- parallel
-# Above 8192 points the batch kernels split the batch across workers, each
-# with its own Clenshaw scratch from the Geodesic block pool.  Every point is
+# Above a per-kernel threshold the batch kernels split the batch across
+# workers, each with its own Clenshaw scratch from the Geodesic block pool.
+# The thresholds differ because the per-point cost does (src/capi.mojo):
+# inverse from 12288, direct and the line kernels from 16384.  Every point is
 # independent, so the parallel answer has to be the serial answer bit for
 # bit; that is the whole contract.  The sizes are deliberately not multiples
 # of the worker count, so the last chunk is short and the tail is covered.
-PARALLEL_THRESHOLD = 8192
+PARALLEL_THRESHOLD = 12288
 
 
 @pytest.mark.parametrize("n", [PARALLEL_THRESHOLD, PARALLEL_THRESHOLD + 1,
@@ -290,6 +292,57 @@ def test_batches_below_the_threshold_match_the_scalar_path():
         one = g.Inverse(lat1[i], lon1[i], lat2[i], lon2[i], g.STANDARD)
         for k in one:
             assert batch[k][i] == one[k], (k, i)
+
+
+# The thresholds are a performance decision, not a numerical one, so a wrong
+# value cannot show up as a wrong answer -- only as a slower call.  These
+# tests pin the values in src/capi.mojo so that changing one is a deliberate
+# act that has to face the measurements in the README.
+INVERSE_THRESHOLD = 12288
+DIRECT_THRESHOLD = 16384
+LINE_THRESHOLD = 16384
+
+
+@pytest.mark.parametrize("n", [INVERSE_THRESHOLD, DIRECT_THRESHOLD - 1,
+                                DIRECT_THRESHOLD])
+def test_crossing_each_threshold_is_bit_identical_for_every_kernel(n):
+    # Every kernel is run twice on the same input, once forced serial
+    # (`_workers = 1`) and once at the default pool, and the outputs must be
+    # equal element for element.  The sizes bracket the thresholds, so at
+    # least one of the three kernels is on the other side of its threshold in
+    # each parametrisation.
+    g = Geodesic.WGS84
+    if g._workers < 2:
+        pytest.skip("single-core machine; the batch kernels stay serial")
+    rng = np.random.default_rng(n)
+    lat1 = np.ascontiguousarray(np.degrees(np.arcsin(rng.uniform(-1, 1, n))))
+    lon1 = np.ascontiguousarray(rng.uniform(-180, 180, n))
+    lat2 = np.ascontiguousarray(np.degrees(np.arcsin(rng.uniform(-1, 1, n))))
+    lon2 = np.ascontiguousarray(rng.uniform(-180, 180, n))
+    azi1 = np.ascontiguousarray(rng.uniform(-180, 180, n))
+    s12 = np.ascontiguousarray(rng.uniform(-2e7, 2e7, n))
+    line = g.Line(37.0, -122.0, 51.0, g.ALL)
+
+    def inverse():
+        return g.InversePairs(lat1, lon1, lat2, lon2, g.ALL)
+
+    def direct():
+        return g.DirectMany(lat1, lon1, azi1, s12, g.ALL)
+
+    def positions():
+        return line.Positions(s12, line.caps)
+
+    saved = g._workers
+    try:
+        for kernel in (inverse, direct, positions):
+            par = kernel()
+            g._workers = 1
+            ser = kernel()
+            g._workers = saved
+            for k in ser:
+                assert np.array_equal(par[k], ser[k]), (kernel.__name__, k, n)
+    finally:
+        g._workers = saved
 
 
 def test_add_points_matches_a_loop():

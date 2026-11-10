@@ -38,8 +38,10 @@ PA_BLOCK = 11  # int64 slots
 # Batch workers.  Mirrors MG_MAX_WORKERS in src/capi.mojo: a Geodesic owns a
 # pool of that many identical blocks so that concurrent workers never share
 # the Clenshaw scratch that lives in one, and the kernel clamps itself to
-# what the batch size can keep busy.  One is the serial path.
-MAX_WORKERS = 32
+# both its own cap and what the batch size can keep busy.  One is the serial
+# path.  The host is shared, so the cap is 4; `bench/parallel_sweep.py`
+# reports the wider worker curve, which is context, not a recommendation.
+MAX_WORKERS = 4
 
 # name -> (argtypes, restype)
 _SIGNATURES = {

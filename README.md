@@ -22,7 +22,9 @@ pixi run build      # src/capi.mojo -> dist/libmojo-geographiclib.so
 pixi run test       # parity against upstream geographiclib
 pixi run bench      # benchmarks against upstream, markdown table on stdout
 pixi run python bench/profile.py   # per-path cost breakdown
-pixi run python bench/sweep.py     # the batch thresholds, re-measured
+pixi run python bench/parallel_sweep.py   # worker and size curves
+pixi run python bench/parallel_builds.py 43354b2   # reference builds for the A/B
+pixi run python bench/parallel_ab.py      # serial / before / new, per size
 ```
 
 Everything runs inside the pixi environment; the pinned toolchain is
@@ -262,21 +264,105 @@ separating because only one of them is arithmetic.
    identical blocks and worker *j* uses slot *j*. Since each point is
    computed by exactly the same code on exactly the same inputs, the parallel
    answer is the serial answer bit for bit -- `tests/test_geodesic.py` asserts
-   that for sizes that straddle the threshold and are not multiples of the
+   that for sizes that straddle every threshold and are not multiples of the
    worker count.
 2. **The single-point glue got cheaper.** Measured with
    `pixi run python bench/profile.py`: `Geodesic.Inverse` went from 21.2 us
    to about 10 us, `GeodesicLine.Position` from 8.0 us to 5.2 us.
 
-Both thresholds in `src/capi.mojo` are measured, and `bench/sweep.py`
-re-measures them:
+The thresholds and the worker cap in `src/capi.mojo` are measured; see *The
+parallel pass* below for the numbers, for why the thresholds are 12288 /
+16384 / 16384 points, and for what the 4-worker cap costs.
 
-* A parallel launch costs several milliseconds, so below **8192 points** the
-   kernel stays serial: 4096 points measured 1.00x, 8191 measured 0.99x, 8192
-   measured 1.65x, 200k measured 3.99x.
-* The worker curve is flat past about 24, so the cap is **32** rather than
-   the core count: 100k inverse points took 210 ms on one worker, 56 at 8, 46
-   at 16, 38.5 at 24 and 37.9 at 64.
+### The parallel pass: a threshold per kernel, and a cap of 4 that costs
+
+The batch kernels were already split across `max.algorithm.parallelize`
+workers, with one threshold (8192 points) for every kernel and a cap of 32
+workers. This pass made the cap **4** and split the threshold per kernel
+family (**12288** inverse, **16384** direct, **16384** line). The arithmetic
+is untouched, so every parallel answer is still the serial answer bit for bit,
+and `tests/test_geodesic.py` checks that at and across every threshold.
+
+The numbers below come from `bench/parallel_ab.py`, which measures three
+builds that differ only in this constant, one process per cell: a **serial**
+build (threshold out of reach), the **before** tree (`43354b2`: cap 32, one
+threshold of 8192) and **new** (this tree). Public calls, warm pool, min of
+11, one run each, ms:
+
+| case | n | serial | before | new | new vs serial | new vs before |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| InversePairs | 8192 | 15.13 | 7.92 | 14.83 | 0.98x | 1.87x slower |
+| InversePairs | 16384 | 29.75 | 9.83 | 15.05 | 0.51x | 1.53x slower |
+| InversePairs | 65536 | 131.74 | 23.14 | 48.79 | 0.37x | 2.11x slower |
+| InversePairs | 100000 | 201.16 | 32.73 | 69.34 | 0.34x | 2.12x slower |
+| DirectMany | 8192 | 5.94 | 5.82 | 5.92 | 1.00x | 1.02x |
+| DirectMany | 16384 | 11.68 | 6.74 | 8.90 | 0.76x | 1.32x slower |
+| DirectMany | 100000 | 72.10 | 13.05 | 29.70 | 0.41x | 2.28x slower |
+| Positions | 8192 | 2.81 | 5.40 | 2.86 | 1.02x | **1.89x faster** |
+| Positions | 16384 | 5.59 | 5.35 | 6.43 | 1.15x | 1.20x slower |
+| Positions | 24576 | 8.46 | 5.47 | 7.57 | 0.89x | 1.39x slower |
+| Positions | 100000 | 36.69 | 8.36 | 15.74 | 0.43x | 1.88x slower |
+
+**What the per-kernel thresholds fix.** One threshold for all three kernels is
+wrong at 8192 points, because the kernels differ about 3x per point and a
+launch does not. Positions is the clear case: the old build took 5.40 ms at
+8192 against 2.81 serial, and this tree stays serial and takes 2.86 -- **1.9x
+removed**, and indistinguishable from the serial build in the same run.
+Direct at 8192 is unchanged (5.82 -> 5.92), so at that size it reads "no
+longer loses" rather than "rescued". Inverse is the opposite: it does win at
+8192 on the old build (7.92 against 15.13 serial), and this tree's 12288
+threshold gives that size up, a deliberate step above the box's 3-4%
+run-to-run spread.
+
+**What the cap of 4 costs, and it is kept only because it is the rule.**
+Kernel only, 100k points, ms, on the same inputs:
+
+| workers | 1 | 2 | 4 | 8 | 16 | 24 | 32 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mg_inverse`, before | 171.4 | 96.5 | 51.5 | 34.5 | 25.3 | 16.1 | 13.7 |
+| `mg_inverse`, new | 169.0 | 91.6 | 51.6 | 51.7 | 50.5 | 51.2 | 53.2 |
+| `mg_line_position`, before | 36.5 | 23.2 | 19.1 | 15.4 | 7.7 | 8.0 | 7.8 |
+
+The old curve keeps falling to 32; this tree's is flat at 4 because the cap
+clamps it there, whatever count the caller passes. That is the whole of the
+100k rows above: at 100k, capping at 4 is **1.9-2.3x slower than the 32-worker
+build** on every batch entry point. It still beats serial (2.9x on inverse,
+2.4x on direct, 2.3x on Positions), so no path here loses to serial, but the
+largest size real callers pass is slower than it was before this pass. The
+cause is the cap, not the thresholds: at 4 workers the two builds are within
+noise of each other (51.5 vs 51.6 ms for the 100k inverse kernel), and the gap
+opens between 4 and 8.
+
+**The verdict, stated plainly.** Two changes are in this pass and they do not
+point the same way. The per-kernel thresholds are a measured win where the old
+build lost (Positions at 8192, 1.9x) and neutral at 100k. The 4-worker cap is
+a measured loss of 1.9-2.3x at 100k and 1.2-1.4x at 16-24k, shipped because
+the brief for this pass caps the host at 4 workers unless the benchmark shows
+more helps. The benchmark shows more helps, so this is recorded as the
+reversal the brief asks about rather than presented as a gain. `MG_MAX_WORKERS`
+in `src/capi.mojo` is the one-line change with the largest measured effect if
+that cap is relaxed; the thresholds were chosen independently of it and stand
+either way.
+
+**How these were measured, and three ways it went wrong.** Every library is
+measured in its own process. Loading the old and the new into one process and
+alternating them gave "serial" numbers 10x the truth, because the second
+library's first call builds its own worker pool while the first is alive. A
+`/tmp` build whose `.pixi` was symlinked silently compiled the working tree
+into the "before" library, so both sides of an A/B were the same binary. And
+the "before" tree's `python/` was copied from this tree, which set
+`MAX_WORKERS = 4` there and hid the 32-worker cap -- every "before" number
+taken before that was fixed was really a 4-worker number, which reversed the
+conclusion in this section twice. Each failure is now caught: `sha256` on
+every library, asserted inside the measuring process, and
+`bench/parallel_builds.py` refuses to finish if the three builds are not
+distinct.
+
+The machine-wide lock was held for hours by another repository's benchmark
+during this pass, so these figures were taken without it and are noisier than
+the ones elsewhere in this file; that is why every claim above is a direction
+or a roughly-3% margin, not a three-significant-figure time.
+
 
 ### The unroll pass: what the kernel-level A/B says
 
@@ -565,7 +651,10 @@ side and all sized by constants in `ported.mojo`:
   `[272..336]` used by `_GenDirect`. Only `[246..336]` is written during a
   call, and that is exactly what the pool exists for. At 32 workers this is
   89 KB per `Geodesic`. A `GeodesicLine` object gets its own 65-double block
-  so a `Position` call never rebuilds the line.
+  so a `Position` call never rebuilds the line. The pool is now one block per
+  worker plus the spare, and the worker cap is 4, so a `Geodesic` holds 5
+  blocks rather than 33: 13.5 KB instead of 89 KB, and `Geodesic()`
+  construction drops by the same factor.
 * *PolygonArea state*, 11 int64: `num` and `crossings`, then eight float64
   from slot 2 (`lat0`, `lon0`, `lat1`, `lon1`, and the two Shewchuk
   accumulators).
@@ -592,7 +681,10 @@ python/mojogeographiclib/   the Python API, module for module with upstream
 tests/                 pytest; parity against the real upstream package
 bench/bench.py         benchmarks, prints a markdown table
 bench/profile.py       per-path cost breakdown (us or ms per call)
-bench/sweep.py         the worker-count and batch-size curves the thresholds come from
+bench/parallel_sweep.py  worker and size curves behind the thresholds
+bench/parallel_builds.py the serial and before builds the A/B compares against
+bench/parallel_ab.py     serial vs before vs new, one process per measurement
+bench/sweep.py         the earlier single-threshold sweep (superseded)
 examples/quickstart.py a runnable tour
 ```
 

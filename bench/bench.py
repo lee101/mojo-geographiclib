@@ -53,9 +53,12 @@ def data(n: int, seed: int = 0):
 CASES = []
 
 
-def case(name, note=""):
+def case(name, note="", solo=False):
+    """Register a benchmark.  `solo` rows return only `ours` and print no
+    upstream column: they measure a size where the port deliberately stays
+    serial, so an "upstream" loop would only repeat the same Python cost."""
     def deco(fn):
-        CASES.append((name, note, fn))
+        CASES.append((name, note, fn, solo))
         return fn
     return deco
 
@@ -233,6 +236,44 @@ def _():
     return ours, theirs
 
 
+# The sizes the parallel thresholds are set below or at (src/capi.mojo): a
+# batch this small must stay serial because a launch would cost more than it
+# saves.  These are the rows to read if the thresholds are ever changed.
+N_SMALL = 8192
+SMALL = data(N_SMALL, seed=2)
+
+
+@case("Inverse, 8k points (below every threshold)", "stays serial by design", solo=True)
+def _():
+    lat1, lon1, lat2, lon2 = SMALL[0], SMALL[1], SMALL[2], SMALL[3]
+
+    def ours():
+        OURS.InversePairs(lat1, lon1, lat2, lon2, OURS.ALL)
+
+    return ours, None
+
+
+@case("Direct, 8k points (below its threshold)", "stays serial by design", solo=True)
+def _():
+    lat1, lon1, azi1, s12 = SMALL[0], SMALL[1], SMALL[4], SMALL[5]
+
+    def ours():
+        OURS.DirectMany(lat1, lon1, azi1, s12, OURS.ALL)
+
+    return ours, None
+
+
+@case("Positions, 8k points (below its threshold)", "stays serial by design", solo=True)
+def _():
+    line_ours = GeodesicLine(OURS, 37.0, -122.0, 51.0, OURS.ALL)
+    d = SMALL[5]
+
+    def ours():
+        line_ours.Positions(d, line_ours.caps)
+
+    return ours, None
+
+
 def machine() -> str:
     try:
         with open("/proc/cpuinfo") as fh:
@@ -252,10 +293,13 @@ def main() -> None:
     print()
     print("| case | note | mojo-geographiclib | upstream geographiclib | speedup |")
     print("| --- | --- | ---: | ---: | ---: |")
-    for name, note, build in CASES:
+    for name, note, build, solo in CASES:
         ours, theirs = build()
         ours()  # warm the shared library out of the measurement
         a = timeit(ours)
+        if theirs is None:
+            print(f"| {name} | {note} | {a * 1e3:.2f} ms | -- | -- |")
+            continue
         b = timeit(theirs)
         print(f"| {name} | {note} | {a * 1e3:.2f} ms | {b * 1e3:.2f} ms | "
               f"{b / a:.1f}x |")

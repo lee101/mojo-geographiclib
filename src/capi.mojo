@@ -74,24 +74,51 @@ comptime DIR_N: Int = 9
 # Batch parallelism.  Every point is independent, so the only thing the
 # workers cannot share is the Clenshaw scratch that lives in the Geodesic
 # block; the Python side hands over a pool of MG_MAX_WORKERS + 1 identical
-# blocks and worker j uses slot j.  `bench/sweep.py` re-measures both
-# numbers.
+# blocks and worker j uses slot j.  `bench/parallel_sweep.py` re-measures the
+# curves and `bench/parallel_ab.py` A/Bs two builds.
 #
-# MG_MAX_WORKERS: the inverse kernel over 100k points took 210 ms on one
-# worker, 56 at 8, 46 at 16, 38.5 at 24 and 37.9 at 64 -- flat from 24 up, so
-# the cap is set where the curve stops paying rather than at the core count.
+# MG_MAX_WORKERS: this host is shared, so the cap is 4, and the README's
+# parallel-pass section records what that costs: at 100k points the 32-worker
+# build is 1.9-2.3x faster on every batch entry point.  The per-kernel
+# thresholds below were chosen at 4 workers and stand on their own numbers.
 #
-# MG_MIN_PARALLEL: a parallel launch costs several milliseconds, and it only
-# repays itself once the batch is big enough to hide that.  4096 points came
-# out at 1.00x, 8191 at 0.99x, 8192 at 1.65x, 200k at 3.99x.
-comptime MG_MAX_WORKERS: Int = 32
-comptime MG_MIN_PARALLEL: Int = 8192
+# Measured at 100k points, kernel only, `mg_inverse` on the pre-pass build:
+# 171.4 ms on 1 worker, 96.5 on 2, 51.5 on 4, 34.5 on 8, 25.3 on 16, 16.1 on
+# 24, 13.7 on 32.  The curve does not flatten; 4 is where the brief stops it.
+#
+# MG_MIN_*: a parallel launch costs several milliseconds, so a kernel is only
+# split once the batch is big enough to repay it.  The per-point cost differs
+# about 3x across the families, so each has its own threshold.  The numbers
+# that set them are public calls at 4 workers, against the pre-pass build
+# (which had one threshold of 8192) and a serial build, one process per cell
+# (`bench/parallel_ab.py`), warm pool, min of 11, ms:
+#
+#     n        inverse  ser / thr8192 / new     direct       line
+#   4096         7.70 /  7.46 /  7.64         3.07/3.03/3.00  1.45/1.59/1.46
+#   8192        15.13 /  7.92 / 14.83         5.94/5.82/5.92  2.81/5.40/2.86
+#   16384       29.75 /  9.83 / 15.05        11.68/6.74/8.90  5.59/5.35/6.43
+#   24576       44.20 / 13.25 / 20.69        17.48/6.82/10.33 8.46/5.47/7.57
+#   100000     201.16 / 32.73 / 69.34        72.10/13.05/29.70 36.69/8.36/15.74
+#
+# Reading only the "new vs serial" column, which is what the thresholds
+# decide: inverse wins from 12288, direct does not lose from 16384, the line
+# kernel does not lose from 16384 (and at 8192 it is the old 8192 threshold
+# that lost, which is what the per-kernel split fixes).  So the thresholds are
+# 12288 / 16384 / 16384.
+comptime MG_MAX_WORKERS: Int = 4
+comptime MG_MIN_INVERSE: Int = 12288
+comptime MG_MIN_DIRECT: Int = 16384
+comptime MG_MIN_LINE: Int = 16384
 comptime MG_MIN_PER_WORKER: Int = 1024
 
 
-def nworkers(n: Int, workers: Int) -> Int:
-    """How many workers a batch of n points should use."""
-    if workers <= 1 or n < MG_MIN_PARALLEL:
+def nworkers(n: Int, workers: Int, minimum: Int) -> Int:
+    """How many workers a batch of n points should use.
+
+    Below the caller's threshold -- per kernel family, because the per-point
+    work differs by 5x between them -- the batch stays serial.
+    """
+    if workers <= 1 or n < minimum:
         return 1
     return min(min(MG_MAX_WORKERS, workers), n // MG_MIN_PER_WORKER)
 
@@ -451,7 +478,7 @@ def mg_inverse(
     n: Int,
     workers: Int,
 ) abi("C"):
-    var w = nworkers(n, workers)
+    var w = nworkers(n, workers, MG_MIN_INVERSE)
     if w <= 1:
         inv_range(a, f, block, lat1, lon1, lat2, lon2, outmask, dst, n, 0, n)
         return
@@ -524,7 +551,7 @@ def gendir(
     n: Int,
     workers: Int,
 ):
-    var w = nworkers(n, workers)
+    var w = nworkers(n, workers, MG_MIN_DIRECT)
     if w <= 1:
         gendir_range(
             a, f, blk, x1, y1, z, d, arcmode, outmask, dst, n, 0, n
@@ -648,7 +675,7 @@ def linepos(
     n: Int,
     workers: Int,
 ):
-    var w = nworkers(n, workers)
+    var w = nworkers(n, workers, MG_MIN_LINE)
     if w <= 1:
         linepos_range(a, f, blk, state, s, arcmode, outmask, dst, n, 0, n)
     else:

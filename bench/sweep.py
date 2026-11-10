@@ -1,10 +1,14 @@
-"""The two measurements the batch thresholds in src/capi.mojo are set from.
+"""The original worker-count and batch-size sweep, kept for reproduction.
 
     pixi run bash -c 'flock /tmp/mojo-bench.lock python bench/sweep.py'
 
-MG_MAX_WORKERS (64) is where the worker curve stops paying; MG_MIN_PARALLEL
-(8192) is where a parallel launch stops costing more than it saves.  Both
-are quoted in the README, so they are reproducible here.
+Note that the thresholds in src/capi.mojo are no longer a single number: the
+parallel pass split them per kernel (12288 inverse, 16384 direct, 16384 line)
+and capped the worker pool at 4.  The sweep that decided those is
+`bench/parallel_sweep.py` and the cross-build comparison is
+`bench/parallel_ab.py`; this script still sweeps one threshold's worth of
+sizes and worker counts, so it shows the shape of the curves but its header
+constants are out of date by design.
 """
 
 from __future__ import annotations
