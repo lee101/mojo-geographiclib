@@ -46,6 +46,7 @@ The public attributes for this class are
 ######################################################################
 
 import math
+import numbers
 import numpy as np
 from mojogeographiclib import _lib
 from mojogeographiclib.geodesiccapability import GeodesicCapability
@@ -54,6 +55,19 @@ __all__ = ["PolygonArea"]
 
 # Slots of the state block written by src/capi.mojo.
 _NUM, _CROSS, _F = 0, 1, 2
+
+
+def _real(name, x):
+  """`x` as a float, or the TypeError upstream raises from inside Math.
+
+  Upstream never validates these arguments: `AddPoint("0", 0)` fails at
+  `abs()` with TypeError, and `AddPoint(0, None)` at the subtraction.  Handing
+  the value straight to ctypes instead turns that into ctypes.ArgumentError,
+  which is a different class, so reject a non-number here the same way.
+  """
+  if isinstance(x, numbers.Real):
+    return x
+  raise TypeError(f"must be real number, not {type(x).__name__}")
 
 
 class PolygonArea:
@@ -115,7 +129,7 @@ class PolygonArea:
 
     _lib.fn("mg_polygon_addpoint")(
       self.earth.a, self.earth.f, self._geod_addr,
-      self._addr, lat, lon,
+      self._addr, _real("lat", lat), _real("lon", lon),
     )
 
   def AddPoints(self, lat, lon):
@@ -131,6 +145,13 @@ class PolygonArea:
 
     x = _lib.f64(lat)
     y = _lib.f64(lon)
+    if x.size != y.size:
+      raise ValueError("AddPoints needs one longitude for every latitude, "
+                       f"got {x.size} and {y.size}")
+    for e in np.ravel(lat):
+      _real("lat", e)
+    for e in np.ravel(lon):
+      _real("lon", e)
     _lib.fn("mg_polygon_addpoints")(
       self.earth.a, self.earth.f, self._geod_addr,
       self._addr, _lib.addr(x), _lib.addr(y), x.size,
@@ -148,7 +169,7 @@ class PolygonArea:
 
     _lib.fn("mg_polygon_addedge")(
       self.earth.a, self.earth.f, self._geod_addr,
-      self._addr, azi, s,
+      self._addr, _real("azi", azi), _real("s", s),
     )
 
   def _result(self, num, out):
@@ -180,7 +201,7 @@ class PolygonArea:
     out = _lib.f64(self._out)
     num = _lib.fn("mg_polygon_compute")(
       self.earth.a, self.earth.f, self._geod_addr,
-      self._addr, int(reverse), int(sign), int(self.polyline),
+      self._addr, bool(reverse), bool(sign), int(self.polyline),
       _lib.addr(out),
     )
     return self._result(num, out)
@@ -202,7 +223,8 @@ class PolygonArea:
     out = _lib.f64(self._out)
     num = _lib.fn("mg_polygon_testpoint")(
       self.earth.a, self.earth.f, self._geod_addr,
-      self._addr, lat, lon, int(reverse), int(sign),
+      self._addr, _real("lat", lat), _real("lon", lon),
+      bool(reverse), bool(sign),
       int(self.polyline), _lib.addr(out),
     )
     return self._result(num, out)
@@ -224,7 +246,8 @@ class PolygonArea:
     out = _lib.f64(self._out)
     num = _lib.fn("mg_polygon_testedge")(
       self.earth.a, self.earth.f, self._geod_addr,
-      self._addr, azi, s, int(reverse), int(sign),
+      self._addr, _real("azi", azi), _real("s", s),
+      bool(reverse), bool(sign),
       int(self.polyline), _lib.addr(out),
     )
     return self._result(num, out)

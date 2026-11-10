@@ -136,12 +136,23 @@ class GeodesicLine:
   def _positions(self, s12_a12, outmask, arcmode, vector):
     fn = self._fn[arcmode]
     workers = self._geod._workers
+    # upstream applies two different masks here, and they are not the same.
+    # _GenPosition computes against `outmask & self.caps & OUT_MASK`
+    # (geodesicline.py), which zeroes any field whose capability word carries
+    # no CAP_ bits -- LATITUDE and AZIMUTH are CAP_NONE, so a bare line asked
+    # for LONGITUDE still returns lon2 -- while Position/ArcPosition build the
+    # dict gated on `outmask & OUT_MASK` alone.  Both are reproduced.
+    kernel_mask = outmask & self.caps & GeodesicCapability.OUT_MASK
+    outmask &= GeodesicCapability.OUT_MASK
     if vector:
       d = _lib.f64(s12_a12)
+      # One input, so nothing can disagree in length; only the caller's shape
+      # has to be carried through to the result dict.
+      shape = np.shape(s12_a12) if np.ndim(s12_a12) > 1 else None
       nout = d.size
       buf, addr = _lib.buf("line.out", nout * _lib.DIR_N)
       fn(self.a, self.f, self._geod._addr, self._addr,
-         _lib.addr(d), outmask, addr, nout, workers)
+         _lib.addr(d), kernel_mask, addr, nout, workers)
       out = buf.copy()
       a12, lat2, lon2, azi2, s12, m12, M12, M21, S12 = [
         out[k * nout:(k + 1) * nout] for k in range(_lib.DIR_N)
@@ -153,18 +164,23 @@ class GeodesicLine:
       w = _lib.io("line.io", 1 + _lib.DIR_N)
       _lib.pack("<d", w.mem, 0, s12_a12)
       a = w.addr
-      fn(self.a, self.f, self._geod._addr, self._addr, a, outmask, a + 8, 1,
-         workers)
+      fn(self.a, self.f, self._geod._addr, self._addr, a, kernel_mask, a + 8,
+         1, workers)
       a12, lat2, lon2, azi2, s12, m12, M12, M21, S12 = \
         _lib.unpack("<9d", w.mem, 8)
-    outmask &= GeodesicCapability.OUT_MASK  # upstream does the same
     if vector:
+      def out_arr(v):
+        return v if shape is None else np.reshape(v, shape)
+      # Both entry points echo the input they were called with: Position its
+      # s12, ArcPosition its a12 (geodesicline.py, Position/ArcPosition).
+      echoed = _lib.f64(s12_a12) if not arcmode else np.asarray(s12_a12)
       result = {
-        'lat1': np.full(nout, self.lat1),
-        'lon1': np.full(nout, self.lon1) if outmask & GeodesicCapability.LONG_UNROLL
-                else ang_normalize(np.full(nout, self.lon1)),
-        'azi1': np.full(nout, self.azi1),
-        'a12' if arcmode else 's12': d,
+        'lat1': out_arr(np.full(nout, self.lat1)),
+        'lon1': (out_arr(np.full(nout, self.lon1))
+                 if outmask & GeodesicCapability.LONG_UNROLL
+                 else out_arr(ang_normalize(np.full(nout, self.lon1)))),
+        'azi1': out_arr(np.full(nout, self.azi1)),
+        'a12' if arcmode else 's12': out_arr(echoed),
       }
     else:
       result = {'lat1': self.lat1,
@@ -172,18 +188,23 @@ class GeodesicLine:
                 Math.AngNormalize(self.lon1),
                 'azi1': self.azi1,
                 'a12' if arcmode else 's12': s12_a12}
+      def out_arr(v):
+        return v
     if arcmode:
-      if outmask & GeodesicCapability.DISTANCE: result['s12'] = s12
+      if outmask & GeodesicCapability.DISTANCE: result['s12'] = out_arr(s12)
     else:
-      result['s12'] = s12
-    result['a12'] = a12
-    if outmask & GeodesicCapability.LATITUDE: result['lat2'] = lat2
-    if outmask & GeodesicCapability.LONGITUDE: result['lon2'] = lon2
-    if outmask & GeodesicCapability.AZIMUTH: result['azi2'] = azi2
-    if outmask & GeodesicCapability.REDUCEDLENGTH: result['m12'] = m12
+      # upstream seeds the result with the caller's s12 before _GenPosition
+      # runs, so it survives even when the DISTANCE_IN capability is missing
+      # and every other field comes back NaN (geodesicline.py, Position).
+      result['s12'] = s12_a12
+      result['a12'] = out_arr(a12)
+    if outmask & GeodesicCapability.LATITUDE: result['lat2'] = out_arr(lat2)
+    if outmask & GeodesicCapability.LONGITUDE: result['lon2'] = out_arr(lon2)
+    if outmask & GeodesicCapability.AZIMUTH: result['azi2'] = out_arr(azi2)
+    if outmask & GeodesicCapability.REDUCEDLENGTH: result['m12'] = out_arr(m12)
     if outmask & GeodesicCapability.GEODESICSCALE:
-      result['M12'] = M12; result['M21'] = M21
-    if outmask & GeodesicCapability.AREA: result['S12'] = S12
+      result['M12'] = out_arr(M12); result['M21'] = out_arr(M21)
+    if outmask & GeodesicCapability.AREA: result['S12'] = out_arr(S12)
     return result
 
   def Position(self, s12, outmask = GeodesicCapability.STANDARD):

@@ -1,7 +1,11 @@
 """Numerical parity with the upstream geographiclib package.
 
 The kernels are compared against the real upstream implementation, field by
-field, on random and adversarial inputs.
+field, on random and adversarial inputs.  Every comparison goes through
+`check`, which asserts three things: the same keys, the same NaN/Inf pattern,
+and a value within `tol` relative error (1e-9, i.e. `ULP`, unless the case
+needs looser).  Degenerate inputs -- empty, one point, duplicates, NaN, inf,
+mismatched batch lengths -- are in test_degenerate.py.
 
 Both implementations round correctly and the build disables floating-point
 contraction, so on WGS84 they agree to 1-2 ulp on essentially every field --
@@ -39,8 +43,12 @@ def relerr(a, b):
 
 
 def check(ours, theirs, label, tol=ULP):
+    # A key set difference is a field the caller asked for and did not get, or
+    # one they did not ask for and got.  Comparing only the keys upstream
+    # happens to have would hide the second half of that.
     assert sorted(ours) == sorted(theirs), (
-        label, sorted(set(ours) ^ set(theirs)))
+        label, "keys ours-only", sorted(set(ours) - set(theirs)),
+        "keys upstream-only", sorted(set(theirs) - set(ours)))
     for k in theirs:
         err = relerr(np.atleast_1d(ours[k]), np.atleast_1d(theirs[k]))
         assert err <= tol, (label, k, err, ours[k], theirs[k])

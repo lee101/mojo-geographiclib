@@ -96,6 +96,30 @@ def _singleton(value, n):
   return np.full(n, float(value), dtype=np.float64)
 
 
+def _same_length(*arrays):
+  """The four batch inputs, as contiguous float64, after checking that they
+  describe the same points.
+
+  Upstream has no batch entry point, so the contract here is the one the
+  scalar API gives a loop: every input is one value per point.  Inputs that
+  disagreed silently produced short results before, which is the one failure
+  mode a caller could not see.
+
+  Returns the arrays and the shape to give the result dict, or None when the
+  caller's arguments were plain scalars/lists and the flat (n,) result is
+  already the shape of the input.
+  """
+  out = [_lib.f64(a) for a in arrays]
+  shapes = [np.shape(a) for a in arrays]
+  sizes = [a.size for a in out]
+  if len(set(sizes)) != 1:
+    raise ValueError(
+      "batch inputs must have the same number of points, got shapes "
+      + repr(shapes))
+  shape = shapes[0] if len(set(shapes)) == 1 and len(shapes[0]) > 1 else None
+  return out, shape
+
+
 class Geodesic:
   """Solve geodesic problems"""
 
@@ -148,6 +172,11 @@ class Geodesic:
     """The equatorial radius in meters (readonly)"""
     self.f = float(f)
     """The flattening (readonly)"""
+    # upstream divides by Math.sq(1 - f) while setting up _ep2, before it ever
+    # reaches its own radius checks, so f == 1 is a ZeroDivisionError there and
+    # not one of the two ValueErrors (geodesic.py, Geodesic.__init__).
+    if 1.0 - self.f == 0.0:
+      raise ZeroDivisionError("float division by zero")
     # The kernel entry points are resolved once: a `getattr` on the shared
     # library costs about as much as one of the Math calls in the result
     # dict, and a single-point call does not have that to spare.
@@ -185,7 +214,7 @@ class Geodesic:
     A batch result can be held on to, so it is copied out of the scratch
     buffer; the caller has to own what it gets back.
     """
-    n = len(inputs[0])
+    n = inputs[0].size
     b, addr = _lib.buf(name + ".out", n * nout)
     self._fn[name](
       self.a, self.f, self._addr,
@@ -212,17 +241,21 @@ class Geodesic:
        self._workers)
     return _lib.unpack("<%dd" % nout, w.mem, 32)
 
-  def _result(self, outmask, out, orig, lon2, lon1, lat1, lat2, vector):
+  def _result(self, outmask, out, orig, lon2, lon1, lat1, lat2, vector,
+              shape=None):
     """Assemble the result dict exactly as upstream does, from either scalars
-    (n == 1) or whole arrays."""
+    (n == 1) or whole arrays in `shape` (None for a flat (n,) result)."""
     outmask &= Geodesic.OUT_MASK  # upstream: outmask &= Geodesic.OUT_MASK
     a12, s12, salp1, calp1, salp2, calp2, m12, M12, M21, S12 = out
+    def out_arr(v):
+      return np.reshape(v, shape) if shape is not None else v
     if vector:
       result = {
-        'lat1': lat_fix(lat1),
-        'lon1': lon1 if outmask & Geodesic.LONG_UNROLL else ang_normalize(lon1),
-        'lat2': lat_fix(lat2),
-        'lon2': lon2,
+        'lat1': out_arr(lat_fix(lat1)),
+        'lon1': out_arr(lon1 if outmask & Geodesic.LONG_UNROLL
+                        else ang_normalize(lon1)),
+        'lat2': out_arr(lat_fix(lat2)),
+        'lon2': out_arr(lon2),
       }
       azi = atan2d
     else:
@@ -234,15 +267,15 @@ class Geodesic:
                 'lat2': Math.LatFix(orig[2]),
                 'lon2': lon2}
       azi = Math.atan2d
-    result['a12'] = a12
-    if outmask & Geodesic.DISTANCE: result['s12'] = s12
+    result['a12'] = out_arr(a12)
+    if outmask & Geodesic.DISTANCE: result['s12'] = out_arr(s12)
     if outmask & Geodesic.AZIMUTH:
-      result['azi1'] = azi(salp1, calp1)
-      result['azi2'] = azi(salp2, calp2)
-    if outmask & Geodesic.REDUCEDLENGTH: result['m12'] = m12
+      result['azi1'] = out_arr(azi(salp1, calp1))
+      result['azi2'] = out_arr(azi(salp2, calp2))
+    if outmask & Geodesic.REDUCEDLENGTH: result['m12'] = out_arr(m12)
     if outmask & Geodesic.GEODESICSCALE:
-      result['M12'] = M12; result['M21'] = M21
-    if outmask & Geodesic.AREA: result['S12'] = S12
+      result['M12'] = out_arr(M12); result['M21'] = out_arr(M21)
+    if outmask & Geodesic.AREA: result['S12'] = out_arr(S12)
     return result
 
   def _inv_fields(self, lat1, lon1, lat2, lon2, outmask, vector):
@@ -254,10 +287,8 @@ class Geodesic:
       out = self._run1("mg_inverse", outmask, len(_lib.INV_FIELDS),
                        lat1, lon1, lat2, lon2)
       return lat1, lon1, lat2, lon2, out
-    l1 = _lib.f64(lat1); o1 = _lib.f64(lon1)
-    l2 = _lib.f64(lat2); o2 = _lib.f64(lon2)
+    l1, o1, l2, o2 = _same_length(lat1, lon1, lat2, lon2)
     out = self._run("mg_inverse", (l1, o1, l2, o2), outmask, len(_lib.INV_FIELDS))
-    return l1, o1, l2, o2, out
 
   def _gen_inverse(self, lat1, lon1, lat2, lon2, outmask, vector):
     """Run the inverse kernel over matching-length inputs."""
@@ -271,15 +302,16 @@ class Geodesic:
         lon2 = Math.AngNormalize(lon2)
       return self._result(outmask, out, (lat1, lon1, lat2), lon2,
                           None, None, None, False)
-    l1 = _lib.f64(lat1); o1 = _lib.f64(lon1)
-    l2 = _lib.f64(lat2); o2 = _lib.f64(lon2)
+    arrays, shape = _same_length(lat1, lon1, lat2, lon2)
+    l1, o1, l2, o2 = arrays
     out = self._run("mg_inverse", (l1, o1, l2, o2), outmask, len(_lib.INV_FIELDS))
     if outmask & Geodesic.OUT_MASK & Geodesic.LONG_UNROLL:
       lon12, e = ang_diff(o1, o2)
       lon2 = (o1 + lon12) + e
     else:
       lon2 = ang_normalize(o2)
-    return self._result(outmask, out, (lat1, lon1, lat2), lon2, o1, l1, l2, True)
+    return self._result(outmask, out, (lat1, lon1, lat2), lon2, o1, l1, l2, True,
+                        shape)
 
   def Inverse(self, lat1, lon1, lat2, lon2,
               outmask = GeodesicCapability.STANDARD):
@@ -323,18 +355,27 @@ class Geodesic:
   def _gen_direct(self, lat1, lon1, azi1, arcmode, s12_a12, outmask, vector):
     name = "mg_arcdirect" if arcmode else "mg_direct"
     if vector:
-      l1 = _lib.f64(lat1); o1 = _lib.f64(lon1)
-      a1 = _lib.f64(azi1); d = _lib.f64(s12_a12)
+      arrays, shape = _same_length(lat1, lon1, azi1, s12_a12)
+      l1, o1, a1, d = arrays
       out = self._run(name, (l1, o1, a1, d), outmask, _lib.DIR_N)
     else:
+      shape = None
       out = self._run1(name, outmask, _lib.DIR_N,
                        lat1, lon1, azi1, s12_a12)
     a12, lat2, lon2, azi2, s, m12, M12, M21, S12 = out
+    # upstream: outmask &= Geodesic.OUT_MASK (geodesic.py, Direct/ArcDirect),
+    # which has to happen before the capability tests below: the capability
+    # words carry CAP bits of their own, so an unmasked mask can test true
+    # for REDUCEDLENGTH purely because LATITUDE (bit 0) is in both.
+    outmask &= Geodesic.OUT_MASK
+    def out_arr(v):
+      return np.reshape(v, shape) if shape is not None else v
     if vector:
       result = {
-        'lat1': lat_fix(l1),
-        'lon1': o1 if outmask & Geodesic.LONG_UNROLL else ang_normalize(o1),
-        'azi1': ang_normalize(a1),
+        'lat1': out_arr(lat_fix(l1)),
+        'lon1': out_arr(o1 if outmask & Geodesic.LONG_UNROLL
+                        else ang_normalize(o1)),
+        'azi1': out_arr(ang_normalize(a1)),
       }
     else:
       result = {'lat1': Math.LatFix(lat1),
@@ -342,18 +383,19 @@ class Geodesic:
                 Math.AngNormalize(lon1),
                 'azi1': Math.AngNormalize(azi1)}
     if arcmode:
-      result['a12'] = a12
-      if outmask & Geodesic.DISTANCE: result['s12'] = s
+      # upstream echoes the caller's own a12 object, so an int stays an int.
+      result['a12'] = d if vector else s12_a12
+      if outmask & Geodesic.DISTANCE: result['s12'] = out_arr(s)
     else:
-      result['s12'] = s
-      result['a12'] = a12
-    if outmask & Geodesic.LATITUDE: result['lat2'] = lat2
-    if outmask & Geodesic.LONGITUDE: result['lon2'] = lon2
-    if outmask & Geodesic.AZIMUTH: result['azi2'] = azi2
-    if outmask & Geodesic.REDUCEDLENGTH: result['m12'] = m12
+      result['s12'] = out_arr(s)
+      result['a12'] = out_arr(a12)
+    if outmask & Geodesic.LATITUDE: result['lat2'] = out_arr(lat2)
+    if outmask & Geodesic.LONGITUDE: result['lon2'] = out_arr(lon2)
+    if outmask & Geodesic.AZIMUTH: result['azi2'] = out_arr(azi2)
+    if outmask & Geodesic.REDUCEDLENGTH: result['m12'] = out_arr(m12)
     if outmask & Geodesic.GEODESICSCALE:
-      result['M12'] = M12; result['M21'] = M21
-    if outmask & Geodesic.AREA: result['S12'] = S12
+      result['M12'] = out_arr(M12); result['M21'] = out_arr(M21)
+    if outmask & Geodesic.AREA: result['S12'] = out_arr(S12)
     return result
 
   def Direct(self, lat1, lon1, azi1, s12,
