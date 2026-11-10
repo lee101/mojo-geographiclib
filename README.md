@@ -596,8 +596,11 @@ prototype instead of `getattr(lib, name)` was tried, on the theory that it
 skips a per-call signature lookup. A/B'd in-process on `line.Position` it came
 out 5.09 us against 4.92 us -- no better, in one run slightly worse. Reverted.
 
-**The GPU.** The host API is available (`max.gpu.host.DeviceContext`) and the
-box has a card with 15.8 GB free, so nothing was skipped for want of one.
+**The GPU.** The host API is available (`max.gpu.host.DeviceContext`). At the
+time of the gate check above the card reported 4309 MiB free, not the 15.8 GB
+an earlier revision of this paragraph quoted; that figure was a stale reading
+of a differently-loaded shared box and is corrected here. Either way the phase
+is skipped on the flops/byte gate as well, so nothing turned on it.
 This kernel is not a GPU kernel. A `Geodesic.InversePairs` call moves 32 bytes
 of input and 80 bytes of output per point, against on the order of 200 flops
 (a count of the series expansions, not a measurement) -- under 2 flops per
@@ -606,6 +609,42 @@ byte -- and those flops are dominated by `sin`, `cos`, `atan2`, `atanh` and
 worst. The 100k points would also have to be copied up (3.2 MB) and back
 (8 MB) against a 22 ms CPU kernel. A GPU path here would be slower and would
 give up bit-parity; the CPU port is the answer, and it is a deliberate one.
+
+**GPU phase: skipped, gate failed (checked 2026-11-10).** The gate was run in
+this order and both checks failed, so no kernel was written, nothing was
+measured before/after, and `src/`, `tests/` and the Python package are
+unchanged by this phase.
+
+1. *Compute intensity.* The gate admits only kernels above ~2 flops/byte in
+   `bench/analysis.md`. The most favourable row in that table is
+   `InversePairs` with all outputs at **~4.2 flops/byte** (32 B in + 80 B out =
+   112 B/point against ~470 static flops), and the next real ones are
+   `DirectMany`/`ArcDirectMany` at **~3.2** and STANDARD `InversePairs` at
+   **~2.1**. Those are the derived maxima: every other row is at or below 2
+   (`Line.Position` loop 3.0 is glue-dominated, `Position`/`Positions`
+   0.6-0.7, `Inverse` loop 0.04), and `analysis.md` already closes the phase
+   with *"No GPU phase"* on exactly this figure. A GPU transfer at 100k points
+   is 3.2 MB up and 8 MB back (derived from the same ABI widths) against a
+   23.79 ms CPU `_run`, and at 1M it is 144 MB against 411 ms — the copy alone
+   is the budget, and the flops are `sin`/`cos`/`atan2` inside a
+   data-dependent Newton loop.
+2. *Shared device capacity.*
+   `nvidia-smi --query-gpu=memory.free --format=csv,noheader` reports
+   **`4309 MiB`** free at the time of the check. The gate skips the phase under
+   4000 MiB; 4309 MiB passes the letter of that check but leaves 309 MiB of
+   headroom over the floor, well inside what other tenants on this shared box
+   take between two runs, and under the 2 GB per-allocation cap only one
+   batch at a time fits beside whatever else is resident.
+
+Verdict: **CPU only for the batch kernels.** There is no
+`CPU only: memory-bound` label to apply either — the port is not
+memory-bandwidth-bound (0.35-0.47 GB/s derived against a machine far faster
+than that); its heavy rows are compute plus Python/numpy glue, which
+`analysis.md` assigns to `simd` and `unroll`, not `gpu`. `_result` at 1M is
+231.47 ms over eight numpy passes and is already vectorised on the CPU; the
+GPU would add two 80 MB transfers to it. If the capacity check is repeated
+when the box is quiet, the flops/byte check still decides the same way, so
+re-running it will not change the verdict.
 
 ## How it works
 
