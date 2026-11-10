@@ -165,9 +165,18 @@ inside the Mojo kernel file or inside the ctypes glue.
 12. **The batch kernels take a trailing `workers` count.** It is how deep the
     caller's block pool is; the kernel clamps it to what the batch size can
     keep busy and to `MG_MAX_WORKERS`, and takes the serial path when it comes
-    out at 1. It is an internal ABI detail -- the Python signatures are
-    upstream's -- and the answer does not depend on it, which is what
-    `tests/test_geodesic.py` asserts.
+   out at 1. It is an internal ABI detail -- the Python signatures are
+   upstream's -- and the answer does not depend on it, which is what
+   `tests/test_geodesic.py` asserts.
+13. **`_C1f` writes its six coefficients out instead of looping.** The loop
+    bound is the compile-time constant `nC1_`, its body has no carried
+    dependency, and writing it out lets the six independent `polyval`s and
+    divisions overlap. The coefficients themselves are computed by the same
+    Horner polynomials in the same index order, so the result is unchanged;
+    that was checked bit for bit against the looping build (all 10 inverse and
+    9 direct output fields, 20,000 random points, `np.array_equal`). A
+    `comptime assert nC1_ == 6` makes a change of
+    `GEOGRAPHICLIB_GEODESIC_ORDER` a build error rather than a short series.
 
 `mojogeographiclib.geomath.Math` is a faithful copy of upstream's `Math` and is
 used only where upstream uses it too: assembling the result dicts and
@@ -189,23 +198,32 @@ Measured on:
     Intel(R) Xeon(R) CPU E5-2697 v4 @ 2.30GHz, 72 threads, Linux x86_64
     python 3.13.14, numpy 2.5.1, best of 3
 
-"before" is the table this file shipped with; "after" is the current code.
-This is a shared box, so treat the short rows as a range rather than a point:
-two runs of the same binary gave 44.13 and 47.27 ms for `Inverse, 100k, all
-outputs`, 17.42 and 26.44 ms for `Direct, 100k`, and 79.55 and 88.72 ms for
-`AddPoint, 20k`. The table below is the first of the two.
+"before" and "after" are this session's two `pixi run bench` runs on the same
+box, before and after the unroll pass; the earlier table this file shipped with
+is not reused because the box has changed. This is a shared box, so treat the
+short rows as a range rather than a point: three full runs of the *same* build
+gave 39.22, 43.08 and 44.13 ms for `Inverse, 100k, all outputs` (and 39.00 ms
+for the run before the last one), 13.05-15.61 ms for `Direct, 100k`, and
+46.37-47.54 ms for `AddPoints, 20k`. A difference of a few ms in those rows is
+noise, which is why the unroll verdict below rests on the kernel-level A/B.
 
 | case | note | before | after | upstream | speedup |
 | --- | --- | ---: | ---: | ---: | ---: |
-| Inverse, 20k scalar calls (Python loop) | scalar API, STANDARD mask | 484.22 ms | 264.87 ms | 2617.71 ms | 9.9x |
-| Inverse, 100k points, all outputs | batch API vs upstream loop | 202.67 ms | 44.13 ms | 13643.09 ms | 309.2x |
-| Inverse, 100k points, STANDARD mask | batch API vs upstream loop | 182.49 ms | 42.77 ms | 11375.38 ms | 265.9x |
-| Direct, 100k points, all outputs | batch API vs upstream loop | 76.45 ms | 17.42 ms | 6213.39 ms | 356.8x |
-| ArcDirect, 100k points, all outputs | batch API vs upstream loop | 65.04 ms | 18.29 ms | 5535.17 ms | 302.6x |
-| GeodesicLine.Position, 20k calls | scalar API, one line | 160.47 ms | 105.94 ms | 169.10 ms | 1.6x |
-| GeodesicLine.Positions, 100k | batch API vs upstream loop | 36.23 ms | 10.55 ms | 838.14 ms | 79.5x |
-| PolygonArea, 20k vertices (AddPoints) | batch API vs upstream loop | 34.57 ms | 33.91 ms | 2609.33 ms | 77.0x |
-| PolygonArea, 20k vertices (AddPoint) | scalar API on both sides | 81.33 ms | 79.55 ms | 2583.17 ms | 32.5x |
+| Inverse, 20k scalar calls (Python loop) | scalar API, STANDARD mask | 238.84 ms | 257.95 ms | 2769.90 ms | 10.7x |
+| Inverse, 100k points, all outputs | batch API vs upstream loop | 41.63 ms | 43.08 ms | 14187.75 ms | 329.3x |
+| Inverse, 100k points, STANDARD mask | batch API vs upstream loop | 34.63 ms | 40.60 ms | 12290.53 ms | 302.7x |
+| Direct, 100k points, all outputs | batch API vs upstream loop | 14.44 ms | 15.61 ms | 6257.65 ms | 400.9x |
+| ArcDirect, 100k points, all outputs | batch API vs upstream loop | 14.49 ms | 19.45 ms | 5980.50 ms | 307.5x |
+| GeodesicLine.Position, 20k calls | scalar API, one line | 124.14 ms | 115.84 ms | 181.41 ms | 1.6x |
+| GeodesicLine.Positions, 100k | batch API vs upstream loop | 20.23 ms | 9.97 ms | 923.29 ms | 92.6x |
+| PolygonArea, 20k vertices (AddPoints) | batch API vs upstream loop | 47.54 ms | 47.12 ms | 2761.11 ms | 58.6x |
+| PolygonArea, 20k vertices (AddPoint) | scalar API on both sides | 95.85 ms | 97.77 ms | 2743.29 ms | 28.1x |
+
+Every `before`/`after` pair above is inside the same build's own run-to-run
+spread except `GeodesicLine.Positions`, whose two runs land at opposite ends of
+it; none of them is evidence for or against the unroll. The honest statement is
+that the unroll move is invisible in this table and its case is made on the
+kernel alone, in the next section.
 
 Reading the table honestly:
 
@@ -223,7 +241,7 @@ Reading the table honestly:
   arithmetic; the call is 5.3 us, of which 2.5 us is the ctypes boundary
   itself -- a nine-argument `ctypes` call costs about 2.5 us whatever is on
   the other end of it. Everything above that has been taken out. Use
-  `Positions` for anything repeated: it is 79x.
+  `Positions` for anything repeated: it is 89-93x.
 * `PolygonArea` barely moved, and that is expected. `AddPoints` is a running
   Shewchuk accumulation, so it cannot be split across workers at all, and
   `AddPoint` is one ctypes call and one geodesic per vertex with no
@@ -260,7 +278,86 @@ re-measures them:
    the core count: 100k inverse points took 210 ms on one worker, 56 at 8, 46
    at 16, 38.5 at 24 and 37.9 at 64.
 
+### The unroll pass: what the kernel-level A/B says
+
+The public rows above cannot resolve a kernel change of a few percent: at 100k
+points the kernel is roughly a third of the `InversePairs` call, so 3% of the
+kernel is 1% of the row, and the row moves by 10% between runs. The kernel was
+therefore measured on its own -- one `ctypes` call into `mg_inverse` / `mg_direct`
+with a preallocated output block and no `_result` -- freshly built binaries,
+same locked box, alternating:
+
+| kernel only, 100,000 points | before | after | 32 workers |
+| --- | ---: | ---: | ---: |
+| `mg_inverse`, serial | 171.5-173.4 ms (3 runs) | 165.4-168.2 ms (3 runs) | 16.3-17.0 -> 15.8-16.4 ms |
+| `mg_direct`, serial | 67.4-70.5 ms | 69.0-71.9 ms | no change expected |
+
+That is a repeatable **~3.5% off the serial `mg_inverse` kernel**. `mg_direct`
+was unchanged, which is consistent but is not a second proof: `mg_direct` calls
+`_C1f` once per `GeodesicLine` construction (`ported.mojo:1744`) and not on its
+per-point path, so a `_C1f` win there would be one call against a line setup and
+a `_GenPosition`, i.e. below the same 2% noise floor. Read the direct column as
+"not contradicted", not as evidence. It also cannot rule out the gain coming
+from somewhere in `mg_inverse`'s longer chain rather than `_C1f`: reverted, it
+is gone; kept, it is there; nothing narrower than that was measured. The
+unrolled loop is at least simpler than what it replaced, not more complicated.
+
+**No result changes, in the last bits or anywhere else.** The unroll keeps the
+same polynomials in the same order, so it was not accepted on a tolerance: the
+looping and unrolled builds were compared with `np.array_equal` on all 10
+inverse and 9 direct output fields for 20,000 random points, and they are
+bit-identical. The test tolerances are unchanged.
+
+**`@parameter for` does not exist on this toolchain.** The technique list names
+it, `MOJO_NOTES.md` does not, and compiling it settles it: both `@parameter` on
+a `for` and `for ... unroll=True` are rejected with *"'for' statement does not
+support decorators"*, and there is no `unroll()` builtin. So every fixed trip
+count here is unrolled by hand, with a `comptime assert` on the order so a
+change of `GEOGRAPHICLIB_GEODESIC_ORDER` is a build error rather than a series
+that is silently short. That note has been added to `MOJO_NOTES.md`.
+
 ### What did not pay, and why
+
+**Unrolling the other fixed-trip loops.** Only the loops above were kept. The
+same measurement was applied to the others and reverted:
+
+* The `C2a` update in `_Lengths` (`nC2_ - 1` = 5 iterations, on every Newton
+  iteration): measured through `mg_inverse` at 173.4 ms against a 170.9-173.4 ms
+  baseline -- inside the ±2% rerun noise, i.e. nothing. It is a five-row linear
+  map, not an independent sextet.
+* `_C3f` (`nC3_ - 1` = 5 iterations, on every Newton iteration): judged, not
+  kept. Its five iterations are dependent through the shared `mult` and share
+  one pointer walk, the same shape as `_C2f`, and it was left alone rather than
+  measured separately once `_C2f` had shown that shape does not pay. This is
+  the weakest entry in this list and is labelled so.
+
+The pattern is the same in each: these bodies are already flat -- a chain of
+multiplies, one `polyval` and one division, no independent work to overlap -- so
+the compiler's existing loop costs nothing measurable against the loads and the
+`hypot`/`atan2` around them. `_C1f` differs only in that all six of its
+coefficients are independent and feed nothing but memory.
+
+**Unrolling `_SinCosSeries` further.** It was already unrolled ×2 upstream and
+in the port, both accumulators are live across iterations, and a third partial
+accumulator would only shorten the recurrence itself -- which changes every
+`Inverse`/`Direct` result in the last bits and breaks the bit-for-bit parity the
+tests assert. It was not tried.
+
+**Multi-accumulator reductions.** There is no loop here that sums independent
+terms, so there was nothing for the technique to apply to. The one reduction
+that looks like a candidate, `_SinCosSeries`, is a Clenshaw recurrence whose
+iterations are strictly serial, which is why it already carries two alternating
+accumulators; splitting it into four would change the summation order, and so
+the results, for a loop that is 3-6 iterations long. `AddPoints` is a Shewchuk
+accumulation whose order *is* the answer. The floating-point summation order is
+therefore unchanged by this pass, and the "results can differ in the last bits"
+caveat is not needed -- nothing here does.
+
+**Bounds-check or index-arithmetic removal.** Every hot buffer is already
+walked with `unsafe_load`/`unsafe_store` behind a pointer, and `--fp-mode
+contract=off` keeps the chain semantics visible; there was no remaining check on
+an index the bound already proves in range. Nothing to remove.
+
 
 **SIMD.** There is no contiguous elementwise loop in the kernels to widen.
 `_GenInverse` is a Newton iteration whose trip count depends on the point,

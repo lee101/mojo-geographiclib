@@ -489,14 +489,25 @@ struct Geodesic:
     @staticmethod
     def _C1f(eps: Float64, c: CoefPtr, k: CoefPtr) -> None:
         """Private: return C1."""
+        # The coefficients are independent, and the trip count is a
+        # compile-time constant, so the loop is written out: the six
+        # polynomials and divisions can then overlap instead of round-robining
+        # through one loop counter.  The assertion makes a change of
+        # GEOGRAPHICLIB_GEODESIC_ORDER a build error, not a short series.
+        comptime assert nC1_ == 6, "unrolled for GEOGRAPHICLIB_GEODESIC_ORDER == 6"
         var eps2 = Math.sq(eps)
         var d = eps
-        var o = 0
-        for l in range(1, nC1_ + 1):  # l is index of C1p[l]
-            var m = (nC1_ - l) // 2  # order of polynomial in eps^2
-            c.unsafe_store(l, d * Math.polyval(m, k, o, eps2) / k.unsafe_load(o + m + 1))
-            o += m + 2
-            d *= eps
+        c.unsafe_store(1, d * Math.polyval(2, k, 0, eps2) / k.unsafe_load(3))
+        d *= eps
+        c.unsafe_store(2, d * Math.polyval(2, k, 4, eps2) / k.unsafe_load(7))
+        d *= eps
+        c.unsafe_store(3, d * Math.polyval(1, k, 8, eps2) / k.unsafe_load(10))
+        d *= eps
+        c.unsafe_store(4, d * Math.polyval(1, k, 11, eps2) / k.unsafe_load(13))
+        d *= eps
+        c.unsafe_store(5, d * Math.polyval(0, k, 14, eps2) / k.unsafe_load(15))
+        d *= eps
+        c.unsafe_store(6, d * Math.polyval(0, k, 16, eps2) / k.unsafe_load(17))
 
     @staticmethod
     def _C1pf(eps: Float64, c: CoefPtr, k: CoefPtr) -> None:

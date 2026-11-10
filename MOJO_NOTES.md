@@ -31,8 +31,37 @@ toolchain bump rather than trusting this file.
 - `SIMD` has no `.min()` / `.max()` methods. The free `min(a, b)` / `max(a, b)`
   work on both scalars and `SIMD` values.
 
-## 2. Export / FFI
+## 1b. Unrolling — there is no `@parameter for` on this toolchain
 
+Do not write `@parameter for`, and do not write `for ... unroll=True`. Both are
+rejected by this pinned compiler (checked 2026-11 by compiling):
+
+```mojo
+@parameter
+for i in range(3):        # error: 'for' statement does not support decorators
+    acc += Float64(i)     #        remove the decorator
+
+for i in range(3, unroll=True):   # error: no matching 'range' overload
+```
+
+There is also no `unroll()` builtin (`use of unknown declaration 'unroll'`).
+The one parameter-level escape that does work is a `comptime N` as a `range`
+bound; `@parameter` on a `def` still parses but is deprecated on this version
+(`'@parameter' is deprecated; use '@__parameter'`).
+
+So unroll a small fixed trip count by hand, and guard it with a comptime
+assertion on the constant that justifies the hand writing:
+
+```mojo
+comptime assert nC1_ == 6, "unrolled for GEOGRAPHICLIB_GEODESIC_ORDER == 6"
+```
+
+One measured result worth carrying: hand-unrolling a loop whose body is a
+dependent chain (shared accumulator, one `polyval`, a pointer walk) bought
+nothing measurable, ±2% on repeated runs; unrolling one whose N bodies are
+genuinely independent bought ~3.5% of the kernel. Measure before keeping it.
+
+## 2. Export / FFI
 - `@export("symbol_name")` sits on the line above the def. The ABI is an *effect*
   before the arrow: `def f(a: Int) abi("C") -> Float64:`.
 - **`@export` now REQUIRES an explicit `abi()`.** Omitting it is an error:
